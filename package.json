@@ -1,0 +1,37 @@
+{
+  "name": "quadratic-tutor",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "vite build && wrangler dev",
+    "build": "vite build",
+    "typecheck": "tsc -p tsconfig.json && tsc -p src/worker/tsconfig.json",
+    "eval": "tsx evals/run.ts",
+    "sim": "tsx sim/run.ts",
+    "deploy": "vite build && wrangler d1 migrations apply quadratic-tutor --remote && wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply quadratic-tutor --local",
+    "lint:curriculum": "tsx evals/lint.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "katex": "^0.18.9",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1",
+    "wrangler": "^4.143.0"
+  },
+  "private": true
+}
