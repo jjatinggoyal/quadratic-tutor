@@ -7,12 +7,13 @@ import { z } from "zod";
 const numberish = z.union([z.string(), z.number()]).transform((v) => String(v).trim());
 
 export const AssessorOutput = z.object({
-  intent: z.enum(["answer", "dont_know", "question", "off_topic", "unclear"]),
+  intent: z.enum(["answer", "dont_know", "question", "off_topic", "unclear", "repeat"]),
   numbers: z.array(numberish).nullish().transform((v) => v ?? []),
   yes_no: z.boolean().nullish().transform((v) => v ?? null),
   choice: z.string().nullish().transform((v) => v ?? null),
   misconception: z.string().nullish().transform((v) => v ?? null),
   note: z.string().nullish().transform((v) => v ?? ""),
+  slower: z.boolean().nullish().transform((v) => v ?? false),
 });
 export type AssessorOutput = z.infer<typeof AssessorOutput>;
 

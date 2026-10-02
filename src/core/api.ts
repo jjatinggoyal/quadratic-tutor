@@ -12,6 +12,10 @@ export interface ProgressRow {
   checksCorrect: number;
   reteachCount: number;
   current: boolean;
+  /** Mistakes made in this topic, most frequent first. */
+  mistakes: { id: string; label: string; count: number; fixed: boolean }[];
+  reviewsPassed: number;
+  reviewsFailed: number;
 }
 
 export interface TurnView {
@@ -23,12 +27,21 @@ export interface TurnView {
   progress: ProgressRow[];
   complete: boolean;
   degraded: boolean;
+  /** TTS rate to use; below 1 when the student asked for slower. */
+  speechRate: number;
+  /** Correct answers in a row, across topics. */
+  streak: number;
+  /** True while a retention ("warm-up") question is pending. */
+  review: boolean;
+  /** Set when the student just overcame a mistake they made earlier. */
+  celebrate: { misconceptionId: string; label: string } | null;
   timings: { totalMs: number; assessorMs: number | null; responderMs: number | null };
 }
 
 export interface SessionResponse {
   studentId: string;
   sessionId: string;
+  sessionNumber: number;
   resumed: boolean;
   turn: TurnView;
 }
@@ -64,6 +77,11 @@ export function progressRows(c: Curriculum, state: SessionState): ProgressRow[] 
       checksCorrect: p?.checksCorrect ?? 0,
       reteachCount: p?.reteachCount ?? 0,
       current: state.subconceptId === s.id,
+      mistakes: Object.entries(p?.misconceptions ?? {})
+        .sort((a, b) => b[1] - a[1])
+        .map(([id, count]) => ({ id, label: s.misconceptions.find((m) => m.id === id)?.label ?? id, count, fixed: p?.fixed?.includes(id) ?? false })),
+      reviewsPassed: p?.reviewsPassed ?? 0,
+      reviewsFailed: p?.reviewsFailed ?? 0,
     };
   });
 }

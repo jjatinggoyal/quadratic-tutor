@@ -36,6 +36,8 @@ export interface Strategy {
 
 export interface Misconception {
   id: string;
+  /** Short, student-facing name, e.g. "signs of the roots". */
+  label: string;
   description: string;
 }
 
@@ -84,6 +86,18 @@ export interface SubconceptProgress {
   checksCorrect: number;
   reteachCount: number;
   strategiesUsed: string[];
+  /** How often each misconception was detected in this topic. */
+  misconceptions: Record<string, number>;
+  /** Misconceptions the student later answered correctly after making them. */
+  fixed: string[];
+  /** Retention checks at the start of later sessions. */
+  reviewsPassed: number;
+  reviewsFailed: number;
+}
+
+export interface DecisionMemo {
+  action: TutorAction;
+  reason: string;
 }
 
 /** Everything needed to resume a session exactly where it stopped. */
@@ -98,11 +112,19 @@ export interface SessionState {
   reteachesHere: number;
   board: BoardItem[];
   progress: Record<string, SubconceptProgress>;
+  /** The last few decisions and their reasons, so the tutor can truthfully say why it did something. */
+  recentDecisions: DecisionMemo[];
+  /** Correct answers in a row, across topics. */
+  streak: number;
+  /** Misconception behind the most recent wrong answer in this topic; cleared when they get one right. */
+  lastMisconception: string | null;
+  /** Set while asking a retention question from an already mastered topic; returnTo is where to continue. */
+  review: { returnTo: string | null } | null;
 }
 
 // ---------- Turn pipeline ----------
 
-export type StudentIntent = "answer" | "dont_know" | "question" | "off_topic" | "unclear";
+export type StudentIntent = "answer" | "dont_know" | "question" | "off_topic" | "unclear" | "repeat";
 
 export interface Assessment {
   intent: StudentIntent;
@@ -114,6 +136,8 @@ export interface Assessment {
   correct: boolean | null;
   /** Where the assessment came from, useful when debugging degraded turns. */
   source: "llm" | "heuristic";
+  /** For intent "repeat": the student asked to hear it more slowly. */
+  slower?: boolean;
 }
 
 export type TutorAction =
@@ -125,6 +149,8 @@ export type TutorAction =
   | "answer_question" // student asked something; answer, then re-ask the pending check
   | "redirect" // off-topic; steer back
   | "clarify" // could not understand the student
+  | "repeat" // replay the last thing the tutor said (optionally slower); no LLM
+  | "review" // start of a later session: retention question on a mastered topic
   | "complete"; // curriculum finished
 
 export interface Decision {
@@ -135,6 +161,8 @@ export interface Decision {
   toSubconceptId: string | null;
   strategyId: string | null;
   checkId: string | null;
+  /** Set when the student just got right the kind of question they previously got wrong. */
+  celebrate?: { misconceptionId: string } | null;
 }
 
 export interface TurnResult {
@@ -145,6 +173,8 @@ export interface TurnResult {
   assessment: Assessment | null;
   state: SessionState;
   telemetry: TurnTelemetry;
+  /** Suggested TTS rate; below 1 when the student asked to slow down. */
+  speechRate: number;
 }
 
 export interface LlmCallTelemetry {

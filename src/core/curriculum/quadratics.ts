@@ -12,7 +12,7 @@ import type { Curriculum } from "../types";
 
 export const quadratics: Curriculum = {
   id: "ncert10-quadratics",
-  version: "2026-09-28.4",
+  version: "2026-10-02.1",
   title: "Quadratic Equations (NCERT Class 10)",
   subconcepts: [
     // ------------------------------------------------------------------
@@ -77,10 +77,10 @@ export const quadratics: Curriculum = {
         },
       ],
       misconceptions: [
-        { id: "no_simplify", description: "Judges by appearance without expanding; misses that x^2 terms cancel (or that x^3 terms cancel)." },
-        { id: "a_zero_ok", description: "Thinks a can be 0 in a quadratic." },
-        { id: "sign_when_moving", description: "Forgets to change the sign when moving a term to the other side." },
-        { id: "degree_confusion", description: "Treats any equation containing x^2 as quadratic, or any x^3 as not quadratic, regardless of simplification." },
+        { id: "no_simplify", label: "simplify before deciding", description: "Judges by appearance without expanding; misses that x^2 terms cancel (or that x^3 terms cancel)." },
+        { id: "a_zero_ok", label: "a can't be zero", description: "Thinks a can be 0 in a quadratic." },
+        { id: "sign_when_moving", label: "signs when moving terms", description: "Forgets to change the sign when moving a term to the other side." },
+        { id: "degree_confusion", label: "spotting the degree", description: "Treats any equation containing x^2 as quadratic, or any x^3 as not quadratic, regardless of simplification." },
       ],
       checks: [
         {
@@ -189,10 +189,10 @@ export const quadratics: Curriculum = {
         },
       ],
       misconceptions: [
-        { id: "negative_square", description: "Squares a negative number to get a negative, e.g. (-3)^2 = -9." },
-        { id: "close_enough", description: "Accepts a non-zero result as 'close enough' or misreads what the result should be." },
-        { id: "arithmetic_slip", description: "Makes a basic arithmetic error during substitution." },
-        { id: "root_vs_coefficient", description: "Confuses a root with a coefficient (a, b or c)." },
+        { id: "negative_square", label: "squaring negatives", description: "Squares a negative number to get a negative, e.g. (-3)^2 = -9." },
+        { id: "close_enough", label: "a root gives exactly zero", description: "Accepts a non-zero result as 'close enough' or misreads what the result should be." },
+        { id: "arithmetic_slip", label: "careful substitution", description: "Makes a basic arithmetic error during substitution." },
+        { id: "root_vs_coefficient", label: "roots vs coefficients", description: "Confuses a root with a coefficient (a, b or c)." },
       ],
       checks: [
         {
@@ -305,10 +305,10 @@ export const quadratics: Curriculum = {
         },
       ],
       misconceptions: [
-        { id: "root_sign_flip", description: "Takes roots with the wrong sign, e.g. (x-2)(x-3) = 0 gives x = -2, -3." },
-        { id: "wrong_pair", description: "Chooses a pair that matches only the product or only the sum." },
-        { id: "one_root_only", description: "Gives only one of the two roots." },
-        { id: "non_monic_split", description: "With a ≠ 1, uses product c instead of a·c, or forgets to divide by the leading coefficient." },
+        { id: "root_sign_flip", label: "signs of the roots", description: "Takes roots with the wrong sign, e.g. (x-2)(x-3) = 0 gives x = -2, -3." },
+        { id: "wrong_pair", label: "choosing the factor pair", description: "Chooses a pair that matches only the product or only the sum." },
+        { id: "one_root_only", label: "finding both roots", description: "Gives only one of the two roots." },
+        { id: "non_monic_split", label: "splitting when a ≠ 1", description: "With a ≠ 1, uses product c instead of a·c, or forgets to divide by the leading coefficient." },
       ],
       checks: [
         {
@@ -419,10 +419,10 @@ export const quadratics: Curriculum = {
         },
       ],
       misconceptions: [
-        { id: "minus_b_sign", description: "Uses b instead of -b, or mishandles -b when b is negative." },
-        { id: "partial_division", description: "Divides only the square-root term by 2a, or divides by a instead of 2a." },
-        { id: "discriminant_arith", description: "Arithmetic or sign error inside b^2 - 4ac (especially when c < 0)." },
-        { id: "abc_misidentified", description: "Reads a, b, c with wrong signs or from a non-standard-form equation." },
+        { id: "minus_b_sign", label: "the −b in the formula", description: "Uses b instead of -b, or mishandles -b when b is negative." },
+        { id: "partial_division", label: "dividing everything by 2a", description: "Divides only the square-root term by 2a, or divides by a instead of 2a." },
+        { id: "discriminant_arith", label: "computing b² − 4ac", description: "Arithmetic or sign error inside b^2 - 4ac (especially when c < 0)." },
+        { id: "abc_misidentified", label: "reading a, b and c", description: "Reads a, b, c with wrong signs or from a non-standard-form equation." },
       ],
       checks: [
         {
@@ -530,10 +530,10 @@ export const quadratics: Curriculum = {
         },
       ],
       misconceptions: [
-        { id: "d_sign_error", description: "Sign error in -4ac, especially when a·c is negative." },
-        { id: "case_swap", description: "Mixes up the cases, e.g. thinks negative D means two roots." },
-        { id: "zero_means_none", description: "Thinks D = 0 means no roots." },
-        { id: "b_not_squared", description: "Uses b instead of b^2." },
+        { id: "d_sign_error", label: "the sign of −4ac", description: "Sign error in -4ac, especially when a·c is negative." },
+        { id: "case_swap", label: "what D tells you", description: "Mixes up the cases, e.g. thinks negative D means two roots." },
+        { id: "zero_means_none", label: "D = 0 means equal roots", description: "Thinks D = 0 means no roots." },
+        { id: "b_not_squared", label: "squaring b", description: "Uses b instead of b^2." },
       ],
       checks: [
         {
@@ -657,10 +657,10 @@ export const quadratics: Curriculum = {
         },
       ],
       misconceptions: [
-        { id: "wrong_equation", description: "Forms the wrong equation from the words." },
-        { id: "keeps_invalid_root", description: "Keeps a root that doesn't fit the context (negative length, negative when positive asked)." },
-        { id: "stops_at_equation", description: "Forms or solves the equation but doesn't answer the actual question asked." },
-        { id: "algebra_slip", description: "Sets up correctly but makes an algebra or arithmetic slip." },
+        { id: "wrong_equation", label: "forming the equation", description: "Forms the wrong equation from the words." },
+        { id: "keeps_invalid_root", label: "rejecting impossible roots", description: "Keeps a root that doesn't fit the context (negative length, negative when positive asked)." },
+        { id: "stops_at_equation", label: "answering the actual question", description: "Forms or solves the equation but doesn't answer the actual question asked." },
+        { id: "algebra_slip", label: "careful algebra", description: "Sets up correctly but makes an algebra or arithmetic slip." },
       ],
       checks: [
         {

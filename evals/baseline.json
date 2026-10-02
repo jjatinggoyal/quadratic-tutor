@@ -1,11 +1,11 @@
 {
-  "promptVersion": "p-2026-09-28.5",
+  "promptVersion": "p-2026-10-02.1",
   "models": {
     "assessor": "google/gemini-3.5-flash-lite",
     "responder": "openai/gpt-5.4",
     "fallback": "anthropic/claude-haiku-4.5"
   },
-  "updatedAt": "2026-09-28T17:50:52.545Z",
+  "updatedAt": "2026-10-02T15:45:39.120Z",
   "scenarios": {
     "stt-homophone-correct": true,
     "hinglish-answer": true,
@@ -19,6 +19,15 @@
     "off-topic": true,
     "stuck-moves-on-flagged": true,
     "trap-not-quadratic": true,
+    "repeat-verbatim": true,
+    "slower-please": true,
+    "repeat-long-phrasing": true,
+    "explain-specific-step": true,
+    "why-did-you-move-on": true,
+    "celebrate-fixed-mistake": true,
+    "recap-names-mistake": true,
+    "retention-pass": true,
+    "retention-fail": true,
     "llm-timeout": true,
     "llm-garbage": true,
     "primary-outage-fallback-model": true,

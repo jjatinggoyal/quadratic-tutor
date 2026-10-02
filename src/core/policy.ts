@@ -14,7 +14,23 @@ export function getCheck(sub: Subconcept | null, id: string | null): CheckItem |
 }
 
 function emptyProgress(subconceptId: string): SubconceptProgress {
-  return { subconceptId, status: "not_started", checksAttempted: 0, checksCorrect: 0, reteachCount: 0, strategiesUsed: [] };
+  return {
+    subconceptId,
+    status: "not_started",
+    checksAttempted: 0,
+    checksCorrect: 0,
+    reteachCount: 0,
+    strategiesUsed: [],
+    misconceptions: {},
+    fixed: [],
+    reviewsPassed: 0,
+    reviewsFailed: 0,
+  };
+}
+
+/** Fill fields added after a state or progress row was saved, so old sessions keep working. */
+function normaliseProgress(p: Partial<SubconceptProgress> & { subconceptId: string }): SubconceptProgress {
+  return { ...emptyProgress(p.subconceptId), ...p };
 }
 
 export function initialState(c: Curriculum): SessionState {
@@ -27,7 +43,7 @@ export function initialState(c: Curriculum): SessionState {
  * earlier session are revisited.
  */
 export function stateFromProgress(c: Curriculum, saved: Record<string, SubconceptProgress>): SessionState {
-  const progress = Object.fromEntries(c.subconcepts.map((s) => [s.id, saved[s.id] ?? emptyProgress(s.id)]));
+  const progress = Object.fromEntries(c.subconcepts.map((s) => [s.id, saved[s.id] ? normaliseProgress(saved[s.id]) : emptyProgress(s.id)]));
   const base: SessionState = {
     curriculumId: c.id,
     curriculumVersion: c.version,
@@ -39,9 +55,35 @@ export function stateFromProgress(c: Curriculum, saved: Record<string, Subconcep
     reteachesHere: 0,
     board: [],
     progress,
+    recentDecisions: [],
+    streak: 0,
+    lastMisconception: null,
+    review: null,
   };
   const start = c.subconcepts.find((s) => progress[s.id].status !== "mastered");
   return start ? enterSubconcept(base, start) : base;
+}
+
+/**
+ * Open a later session with a retention question from an already mastered
+ * topic. Uses the topic's last check, which a student who mastered it in two
+ * checks is least likely to have seen. Afterwards the student continues where
+ * the session would otherwise have started.
+ */
+export function startReview(c: Curriculum, state: SessionState, subconceptId: string): SessionState {
+  const sub = getSubconcept(c, subconceptId);
+  if (!sub || state.progress[sub.id]?.status !== "mastered") return state;
+  const check = sub.checks[sub.checks.length - 1];
+  return {
+    ...state,
+    review: { returnTo: state.subconceptId },
+    subconceptId: sub.id,
+    strategyIndex: 0,
+    pendingCheckId: check.id,
+    usedCheckIds: [check.id],
+    correctInARow: 0,
+    reteachesHere: 0,
+  };
 }
 
 /**
@@ -50,7 +92,15 @@ export function stateFromProgress(c: Curriculum, saved: Record<string, Subconcep
  * dropped; new ones start as not_started. If the current subconcept or pending
  * check no longer exists, the student restarts that subconcept cleanly.
  */
-export function rebaseState(state: SessionState, c: Curriculum): SessionState {
+export function rebaseState(saved: SessionState, c: Curriculum): SessionState {
+  const state: SessionState = {
+    ...saved,
+    recentDecisions: saved.recentDecisions ?? [],
+    streak: saved.streak ?? 0,
+    lastMisconception: saved.lastMisconception ?? null,
+    review: saved.review ?? null,
+    progress: Object.fromEntries(Object.entries(saved.progress).map(([id, p]) => [id, normaliseProgress(p)])),
+  };
   if (state.curriculumVersion === c.version && state.curriculumId === c.id) return state;
   const progress = Object.fromEntries(c.subconcepts.map((s) => [s.id, state.progress[s.id] ?? emptyProgress(s.id)]));
   const next: SessionState = { ...state, curriculumId: c.id, curriculumVersion: c.version, progress };
@@ -128,6 +178,7 @@ export function decide(c: Curriculum, state: SessionState, a: Assessment): Polic
     state,
   });
 
+  if (a.intent === "repeat") return stay("repeat", `Student asked to hear that again${a.slower ? ", more slowly" : ""}; replaying the last thing said. Progress unchanged.`);
   if (a.intent === "question") return stay("answer_question", "Student asked a question; answering it and keeping the same question open. Progress unchanged.");
   if (a.intent === "off_topic") return stay("redirect", "Student went off-topic; steering back. Progress unchanged.");
   if (a.intent === "unclear") return stay("clarify", "Couldn't make out an answer; asking the student to try again. Progress unchanged.");
@@ -140,8 +191,34 @@ export function decide(c: Curriculum, state: SessionState, a: Assessment): Polic
   // ----- correct -----
   if (a.intent === "answer" && a.correct) {
     const inARow = state.correctInARow + 1;
-    const updated: SubconceptProgress = { ...prog, checksAttempted: prog.checksAttempted + 1, checksCorrect: prog.checksCorrect + 1 };
+    const fixedNow = state.lastMisconception && sub.misconceptions.some((m) => m.id === state.lastMisconception) ? state.lastMisconception : null;
+    const updated: SubconceptProgress = {
+      ...prog,
+      checksAttempted: prog.checksAttempted + 1,
+      checksCorrect: prog.checksCorrect + 1,
+      fixed: fixedNow ? addUnique(prog.fixed, fixedNow) : prog.fixed,
+    };
     const need = sub.mastery.correctInARow;
+    const celebrate = fixedNow ? { misconceptionId: fixedNow } : null;
+    const fixedText = fixedNow ? ` They got right the kind of question they missed earlier (${fixedNow}).` : "";
+    state = { ...state, streak: state.streak + 1, lastMisconception: null };
+
+    // Retention check from an earlier session: one correct answer is enough.
+    if (state.review) {
+      const kept: SessionState = {
+        ...state,
+        review: null,
+        progress: { ...state.progress, [sub.id]: { ...updated, reviewsPassed: prog.reviewsPassed + 1 } },
+      };
+      const back = getSubconcept(c, state.review.returnTo);
+      const reason = `Retention check on "${sub.title}": student ${said}, which matches the key (${key}), so they still remember it.`;
+      if (!back) return moveOn(c, kept, sidx, { ...base, action: "advance", reason, strategyId, celebrate });
+      const entered = enterSubconcept(kept, back);
+      return {
+        decision: { ...base, action: "advance", reason: `${reason} Continuing with "${back.title}".`, toSubconceptId: back.id, checkId: entered.pendingCheckId, strategyId: back.strategies[0].id, celebrate },
+        state: entered,
+      };
+    }
 
     if (inARow < need) {
       const { check: nextCheck, used } = pickNextCheck(sub, state.usedCheckIds, check.id);
@@ -151,7 +228,8 @@ export function decide(c: Curriculum, state: SessionState, a: Assessment): Polic
           action: "next_check",
           strategyId,
           checkId: nextCheck.id,
-          reason: `Student ${said}, which matches the key (${key}). ${inARow}/${need} correct in a row — one more check before calling it mastered.`,
+          reason: `Student ${said}, which matches the key (${key}).${fixedText} ${inARow}/${need} correct in a row — one more check before calling it mastered.`,
+          celebrate,
         },
         state: { ...state, correctInARow: inARow, pendingCheckId: nextCheck.id, usedCheckIds: used, progress: { ...state.progress, [sub.id]: updated } },
       };
@@ -165,8 +243,9 @@ export function decide(c: Curriculum, state: SessionState, a: Assessment): Polic
     return moveOn(c, mastered, sidx, {
       ...base,
       action: "advance",
-      reason: `Student ${said}, which matches the key (${key}). ${inARow}/${need} correct in a row → "${sub.title}" mastered.`,
+      reason: `Student ${said}, which matches the key (${key}).${fixedText} ${inARow}/${need} correct in a row → "${sub.title}" mastered.`,
       strategyId,
+      celebrate,
     });
   }
 
@@ -174,7 +253,21 @@ export function decide(c: Curriculum, state: SessionState, a: Assessment): Polic
   const why = a.intent === "dont_know" ? `Student ${said}` : `Student ${said}, but the answer is ${key}`;
   const mis = sub.misconceptions.find((m) => m.id === a.misconceptionId);
   const misText = mis ? ` Likely misconception: ${mis.id}.` : "";
-  const attempted: SubconceptProgress = { ...prog, checksAttempted: prog.checksAttempted + 1 };
+  const attempted: SubconceptProgress = {
+    ...prog,
+    checksAttempted: prog.checksAttempted + 1,
+    misconceptions: mis ? { ...prog.misconceptions, [mis.id]: (prog.misconceptions[mis.id] ?? 0) + 1 } : prog.misconceptions,
+  };
+  state = { ...state, streak: 0, lastMisconception: mis?.id ?? state.lastMisconception };
+
+  // Failed retention check: the topic is no longer mastered; re-teach it now, then carry on.
+  let reviewText = "";
+  if (state.review) {
+    attempted.status = "in_progress";
+    attempted.reviewsFailed = prog.reviewsFailed + 1;
+    reviewText = ` Retention check on "${sub.title}" failed, so it is no longer counted as mastered.`;
+    state = { ...state, review: null };
+  }
 
   if (state.reteachesHere >= sub.mastery.maxReteaches) {
     const flagged: SessionState = {
@@ -200,7 +293,7 @@ export function decide(c: Curriculum, state: SessionState, a: Assessment): Polic
       action: "reteach",
       strategyId: nextStrategy.id,
       checkId: nextCheck.id,
-      reason: `${why}.${misText} Strategy "${sub.strategies[state.strategyIndex].name}" didn't land, so re-teaching with "${nextStrategy.name}"${targeted ? ` (it targets ${a.misconceptionId})` : ""} and checking again with a fresh question (re-teach ${state.reteachesHere + 1}/${sub.mastery.maxReteaches}).`,
+      reason: `${why}.${misText}${reviewText} Strategy "${sub.strategies[state.strategyIndex].name}" didn't land, so re-teaching with "${nextStrategy.name}"${targeted ? ` (it targets ${a.misconceptionId})` : ""} and checking again with a fresh question (re-teach ${state.reteachesHere + 1}/${sub.mastery.maxReteaches}).`,
     },
     state: {
       ...state,

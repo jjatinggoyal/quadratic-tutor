@@ -61,7 +61,7 @@ async function runOnce(s: Scenario): Promise<RunOutcome> {
     ...(s.timeouts ? { timeouts: s.timeouts } : {}),
   };
   const before = s.state();
-  const r = await runTurn(deps, before, [], s.student);
+  const r = await runTurn(deps, before, s.history ?? [], s.student);
   const failures = [...deterministicChecks(s, before, r)];
   if (s.expect.judge?.length && failures.length === 0) failures.push(...(await judge(s, before, r)));
   return { ok: failures.length === 0, failures, action: r.decision.action, speech: r.speech, totalMs: r.telemetry.totalMs };
@@ -82,6 +82,10 @@ function deterministicChecks(s: Scenario, before: ReturnType<Scenario["state"]>,
   }
   if (e.degraded !== undefined && r.telemetry.degraded !== e.degraded) f.push(`degraded: expected ${e.degraded}, got ${r.telemetry.degraded}`);
   if (e.maxTotalMs && r.telemetry.totalMs > e.maxTotalMs) f.push(`too slow: ${r.telemetry.totalMs}ms > ${e.maxTotalMs}ms`);
+  if (e.custom) {
+    const msg = e.custom(r, before);
+    if (msg) f.push(msg);
+  }
   if (e.board) {
     const msg = e.board(r.board);
     if (msg) f.push(`board: ${msg}`);
@@ -94,7 +98,7 @@ function deterministicChecks(s: Scenario, before: ReturnType<Scenario["state"]>,
   for (const re of e.speechMustNot ?? []) if (re.test(r.speech)) f.push(`speech contains forbidden ${re}`);
   const pending = getCheck(getSubconcept(quadratics, r.state.subconceptId), r.state.pendingCheckId);
   let llmPart = r.speech;
-  if (pending && r.decision.action !== "complete") {
+  if (pending && r.decision.action !== "complete" && r.decision.action !== "repeat") {
     if (!r.speech.endsWith(pending.spoken)) f.push("speech does not end by asking the pending question");
     llmPart = r.speech.slice(0, r.speech.lastIndexOf(pending.spoken));
   }
@@ -137,7 +141,7 @@ async function judge(s: Scenario, before: ReturnType<Scenario["state"]>, r: Turn
       {
         role: "system",
         content:
-          'You are grading one turn of an AI maths tutor for Indian Class 10 students. Judge strictly but fairly, only against the listed criteria. Respond as JSON: {"results":[{"criterion": string, "pass": boolean, "reason": string}]} with one entry per criterion, in order.',
+          'You are grading one turn of an AI maths tutor for Indian Class 10 students. Judge strictly but fairly, only against the listed criteria. Note: the system always appends the pending question at the end of the tutor reply ("So, back to our question…" / "Now, your turn…"); that is expected and must not count against any criterion. Respond as JSON: {"results":[{"criterion": string, "pass": boolean, "reason": string}]} with one entry per criterion, in order.',
       },
       {
         role: "user",

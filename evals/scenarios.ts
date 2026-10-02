@@ -1,5 +1,6 @@
 import type { LlmTransport } from "../src/core/llm";
-import type { BoardItem, SessionState, StudentIntent, TutorAction } from "../src/core/types";
+import type { HistoryLine } from "../src/core/prompts";
+import type { BoardItem, SessionState, StudentIntent, TurnResult, TutorAction } from "../src/core/types";
 import { garbageTransport, hangingTransport, outageTransport, scriptedTransport, stateAt } from "./fixtures";
 
 // The regression suite. Each scenario is one student turn from a fixed state,
@@ -30,6 +31,8 @@ export interface Expect {
   maxWords?: number; // for the LLM-written part of the speech
   judge?: string[]; // rubric items for the LLM judge
   board?: (items: BoardItem[]) => string | null; // return a failure message, or null
+  /** Any other check on the result; return a failure message, or null. */
+  custom?: (r: TurnResult, before: SessionState) => string | null;
 }
 
 export interface Scenario {
@@ -37,11 +40,16 @@ export interface Scenario {
   catches: string; // the regression this scenario exists to catch
   state: () => SessionState;
   student: string;
+  /** Conversation before this turn (oldest first). */
+  history?: HistoryLine[];
   /** Override the transport (resilience scenarios). Receives the real one. */
   transport?: (real: LlmTransport, models: { assessor: string; responder: string; fallback: string }) => LlmTransport;
   timeouts?: { assessorMs: number; responderMs: number; assessorBudgetMs: number; responderBudgetMs: number };
   expect: Expect;
 }
+
+const TAUGHT =
+  "We split the middle term. For x squared plus x minus 6, find two numbers that multiply to minus 6 and add to 1: that's 3 and minus 2. Rewrite as x squared plus 3 x minus 2 x minus 6. Group: x times x plus 3, minus 2 times x plus 3. The bracket x plus 3 appears twice, so we get x plus 3 times x minus 2 equals 0. Now, your turn. Solve x squared minus 3 x minus 10 equals 0 by factorisation. What are the roots?";
 
 const FAST_TIMEOUTS = { assessorMs: 300, responderMs: 300, assessorBudgetMs: 700, responderBudgetMs: 700 };
 
@@ -183,6 +191,134 @@ export const scenarios: Scenario[] = [
       action: "reteach",
       misconception: ["no_simplify", "degree_confusion"],
       judge: ["Makes clear that you must expand/simplify first, and that here the x squared terms cancel."],
+    },
+  },
+  // ------------------------------------------------------------- asking for help
+  {
+    id: "repeat-verbatim",
+    catches: "'Repeat that' producing a paraphrase (or a slow LLM round trip) instead of the same words again.",
+    state: () => stateAt("factorisation", "fa_monic_neg"),
+    history: [{ role: "tutor", text: TAUGHT }],
+    student: "sorry, can you repeat that?",
+    expect: {
+      intent: "repeat",
+      action: "repeat",
+      pendingUnchanged: true,
+      custom: (r) => (r.speech !== TAUGHT ? "speech is not the previous tutor turn verbatim" : r.telemetry.calls.length ? "used an LLM call for a repeat" : null),
+    },
+  },
+  {
+    id: "slower-please",
+    catches: "'Slower please' being answered with new words at the same speed.",
+    state: () => stateAt("factorisation", "fa_monic_neg"),
+    history: [{ role: "tutor", text: TAUGHT }],
+    student: "too fast, slower please",
+    expect: { intent: "repeat", action: "repeat", custom: (r) => (r.speechRate >= 1 ? `speechRate ${r.speechRate}, expected < 1` : r.speech !== TAUGHT ? "not replayed verbatim" : null) },
+  },
+  {
+    id: "repeat-long-phrasing",
+    catches: "The assessor not recognising a repeat request phrased at length (the local fast path doesn't catch this one).",
+    state: () => stateAt("factorisation", "fa_monic_neg"),
+    history: [{ role: "tutor", text: TAUGHT }],
+    student: "sorry ma'am there was a lot of noise here and I could not hear you properly, could you say that once more",
+    expect: { intent: "repeat", action: "repeat", custom: (r) => (r.speech !== TAUGHT ? "not replayed verbatim" : null) },
+  },
+  {
+    id: "explain-specific-step",
+    catches: "A request about one specific step getting a generic re-explanation of the whole topic.",
+    state: () => stateAt("factorisation", "fa_monic_neg"),
+    history: [{ role: "tutor", text: TAUGHT }],
+    student: "can you explain the grouping step again? I didn't get how x plus 3 came twice",
+    expect: {
+      intent: "question",
+      action: "answer_question",
+      pendingUnchanged: true,
+      judge: [
+        "Explains specifically the grouping step: taking x common from the first pair and minus 2 from the second pair, so that (x + 3) appears in both.",
+        "Stays with the earlier worked example (x squared plus x minus 6, which may appear in its split form x squared + 3x - 2x - 6) rather than switching to a different equation for the explanation.",
+      ],
+    },
+  },
+  {
+    id: "why-did-you-move-on",
+    catches: "The tutor inventing a reason for its own earlier decision instead of the real one.",
+    state: () =>
+      stateAt("factorisation", "fa_monic_neg", {
+        recentDecisions: [
+          { action: "next_check", reason: 'Student answered "yes", which matches the key (yes). 1/2 correct in a row — one more check before calling it mastered.' },
+          { action: "advance", reason: 'Student answered "yes", which matches the key (yes). 2/2 correct in a row → "What a root is; checking a root by substitution" mastered. Next: "Solving by factorisation".' },
+        ],
+      }),
+    student: "wait, why did we move on already? I only answered two questions",
+    expect: {
+      intent: "question",
+      action: "answer_question",
+      pendingUnchanged: true,
+      judge: [
+        "Gives the real reason: the student answered two questions in a row correctly, which counts as mastering checking roots.",
+        "Does not claim that moving on was a mistake or too fast, and does not invent any other reason.",
+      ],
+    },
+  },
+
+  // ------------------------------------------------------------- motivation & memory
+  {
+    id: "celebrate-fixed-mistake",
+    catches: "Missing the moment a student overcomes a mistake they made earlier.",
+    state: () => stateAt("factorisation", "fa_monic_mixed", { lastMisconception: "root_sign_flip", misconceptionsHere: { root_sign_flip: 1 } }),
+    student: "x plus 4 into x minus 3, so minus 4 and 3",
+    expect: {
+      intent: "answer",
+      correct: true,
+      action: "next_check",
+      custom: (r) =>
+        r.decision.celebrate?.misconceptionId !== "root_sign_flip"
+          ? "decision did not record the fixed misconception"
+          : !r.state.progress.factorisation.fixed.includes("root_sign_flip")
+            ? "progress did not record the fix"
+            : null,
+      judge: ["Specifically praises getting the signs of the roots right this time (not just a generic 'correct')."],
+    },
+  },
+  {
+    id: "recap-names-mistake",
+    catches: "Topic recaps that are generic instead of naming the student's own mistake.",
+    state: () => stateAt("factorisation", "fa_monic_mixed", { correctInARow: 1, misconceptionsHere: { root_sign_flip: 2 } }),
+    student: "minus 4 and 3",
+    expect: {
+      intent: "answer",
+      correct: true,
+      action: "advance",
+      nextSubconcept: "quadratic_formula",
+      judge: ["Recaps factorisation and reminds the student about the sign of the roots (e.g. x - 3 = 0 gives +3), the mistake they made earlier."],
+    },
+  },
+  {
+    id: "retention-pass",
+    catches: "A passed warm-up check not returning the student to where they left off.",
+    state: () => stateAt("quadratic_formula", "qf_basic", { reviewOf: { subconceptId: "factorisation", checkId: "fa_nonmonic_mixed" } }),
+    student: "two by three and minus half",
+    expect: {
+      intent: "answer",
+      correct: true,
+      action: "advance",
+      nextSubconcept: "quadratic_formula",
+      statusAfter: { factorisation: "mastered" },
+      custom: (r) => (r.state.progress.factorisation.reviewsPassed !== 1 ? "reviewsPassed not incremented" : r.state.review ? "still in review mode" : null),
+    },
+  },
+  {
+    id: "retention-fail",
+    catches: "A failed warm-up check being ignored instead of re-opening the forgotten topic.",
+    state: () => stateAt("quadratic_formula", "qf_basic", { reviewOf: { subconceptId: "factorisation", checkId: "fa_nonmonic_mixed" } }),
+    student: "2 and 3",
+    expect: {
+      intent: "answer",
+      correct: false,
+      action: "reteach",
+      nextSubconcept: "factorisation",
+      statusAfter: { factorisation: "in_progress" },
+      custom: (r) => (r.state.progress.factorisation.reviewsFailed !== 1 ? "reviewsFailed not incremented" : null),
     },
   },
 

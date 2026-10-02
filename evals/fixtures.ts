@@ -1,7 +1,7 @@
 import { applyBoardOps, QUESTION_IDS } from "../src/core/board";
 import { quadratics } from "../src/core/curriculum/quadratics";
 import type { CompletionRequest, CompletionResponse, LlmTransport } from "../src/core/llm";
-import { stateFromProgress } from "../src/core/policy";
+import { startReview, stateFromProgress } from "../src/core/policy";
 import type { BoardOp, SessionState, SubconceptProgress } from "../src/core/types";
 
 /**
@@ -12,14 +12,34 @@ import type { BoardOp, SessionState, SubconceptProgress } from "../src/core/type
 export function stateAt(
   subconceptId: string,
   checkId: string,
-  o: { strategyIndex?: number; reteachesHere?: number; correctInARow?: number } = {},
+  o: {
+    strategyIndex?: number;
+    reteachesHere?: number;
+    correctInARow?: number;
+    lastMisconception?: string;
+    misconceptionsHere?: Record<string, number>;
+    recentDecisions?: SessionState["recentDecisions"];
+    /** Make this a retention check on an earlier mastered topic, returning here afterwards. */
+    reviewOf?: { subconceptId: string; checkId: string };
+  } = {},
 ): SessionState {
   const c = quadratics;
   const idx = c.subconcepts.findIndex((s) => s.id === subconceptId);
   if (idx < 0) throw new Error(`unknown subconcept ${subconceptId}`);
   const progress: Record<string, SubconceptProgress> = {};
   for (const s of c.subconcepts.slice(0, idx)) {
-    progress[s.id] = { subconceptId: s.id, status: "mastered", checksAttempted: 2, checksCorrect: 2, reteachCount: 0, strategiesUsed: [s.strategies[0].id] };
+    progress[s.id] = {
+      subconceptId: s.id,
+      status: "mastered",
+      checksAttempted: 2,
+      checksCorrect: 2,
+      reteachCount: 0,
+      strategiesUsed: [s.strategies[0].id],
+      misconceptions: {},
+      fixed: [],
+      reviewsPassed: 0,
+      reviewsFailed: 0,
+    };
   }
   const base = stateFromProgress(c, progress);
   const sub = c.subconcepts[idx];
@@ -32,7 +52,7 @@ export function stateAt(
   ];
   if (check.math) ops.push({ op: "write", id: QUESTION_IDS.math, kind: "math", content: check.math });
 
-  return {
+  const positioned: SessionState = {
     ...base,
     subconceptId,
     pendingCheckId: checkId,
@@ -43,9 +63,21 @@ export function stateAt(
     board: applyBoardOps([], ops).board,
     progress: {
       ...base.progress,
-      [subconceptId]: { ...base.progress[subconceptId], status: "in_progress", reteachCount: o.reteachesHere ?? 0 },
+      [subconceptId]: { ...base.progress[subconceptId], status: "in_progress", reteachCount: o.reteachesHere ?? 0, misconceptions: o.misconceptionsHere ?? {} },
     },
+    lastMisconception: o.lastMisconception ?? null,
+    recentDecisions: o.recentDecisions ?? [],
   };
+  if (!o.reviewOf) return positioned;
+  const reviewed = startReview(c, positioned, o.reviewOf.subconceptId);
+  const rsub = c.subconcepts.find((s) => s.id === o.reviewOf!.subconceptId)!;
+  const rcheck = rsub.checks.find((q) => q.id === o.reviewOf!.checkId)!;
+  const reviewOps: BoardOp[] = [
+    { op: "write", id: "title", kind: "text", content: rsub.title },
+    { op: "write", id: QUESTION_IDS.text, kind: "text", content: `Your turn: ${rcheck.text}` },
+    ...(rcheck.math ? [{ op: "write" as const, id: QUESTION_IDS.math, kind: "math" as const, content: rcheck.math }] : []),
+  ];
+  return { ...reviewed, pendingCheckId: rcheck.id, usedCheckIds: [rcheck.id], board: applyBoardOps([], reviewOps).board };
 }
 
 // ---------------------------------------------------------------------------

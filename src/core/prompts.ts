@@ -1,10 +1,10 @@
 import { describeAnswer } from "./grader";
 import type { ChatMessage } from "./llm";
-import type { Assessment, BoardItem, CheckItem, Decision, Strategy, Subconcept, TutorAction } from "./types";
+import type { Assessment, BoardItem, CheckItem, Decision, DecisionMemo, Misconception, Strategy, Subconcept, TutorAction } from "./types";
 
 // Bump whenever either prompt changes. It is stored on every turn so a quality
 // change can be traced to a prompt change (see DESIGN.md, Observability).
-export const PROMPT_VERSION = "p-2026-09-28.5";
+export const PROMPT_VERSION = "p-2026-10-02.1";
 
 export interface HistoryLine {
   role: "student" | "tutor";
@@ -32,8 +32,9 @@ The reply comes from speech recognition, so expect errors: "to"/"too" often mean
 intent (pick one):
 - "answer": they attempt an answer, even if it is wrong, partial, or hedged ("maybe 3?").
 - "dont_know": they say they don't know, give up, or ask to just be told the answer.
-- "question": they ask about the maths or the lesson, or ask to repeat/explain something.
-- "off_topic": unrelated to the lesson.
+- "question": they ask about the maths or the lesson, ask you to explain something (a step, a word), or ask about the lesson itself — why you moved on, why you're explaining again, why the question changed, how they're doing.
+- "repeat": they only ask to hear the last thing again, or to say it more slowly; set "slower": true if they want it slower.
+- "off_topic": unrelated to the lesson and to the tutoring session.
 - "unclear": you cannot tell what they mean, OR they only read out working without stating a final answer, OR their reply contradicts itself (e.g. "no, it's not a root" but their working shows it gives zero).
 
 Extract only for intent "answer". ${shape} Use null for fields that do not apply.
@@ -42,7 +43,7 @@ Extract only what the student actually said. Never compute, finish or correct th
 "misconception": if the answer is wrong, the id from the list below that best explains the mistake, otherwise null.
 "note": one short sentence on what the student did or seems to think.
 
-Respond with a single JSON object: {"intent", "numbers", "yes_no", "choice", "misconception", "note"}.`;
+Respond with a single JSON object: {"intent", "numbers", "yes_no", "choice", "misconception", "note", "slower"}.`;
 
   const recent = history.slice(-4).map((h) => `${h.role === "tutor" ? "Tutor" : "Student"}: ${h.text}`).join("\n");
   const user = `Topic: ${sub.title}
@@ -72,31 +73,36 @@ const ACTION_BRIEF: Record<TutorAction, string> = {
   next_check:
     "The student got it right. Confirm briefly and specifically what they did right (one sentence). Do not re-teach.",
   advance:
-    "The student has mastered the previous topic. Congratulate them in one sentence, then introduce the NEW topic using the strategy below.",
+    "The student has mastered the previous topic (or, if the decision says so, passed a warm-up check on an earlier topic). Congratulate them in one sentence and recap the finished topic in one sentence — if 'Mistakes in the finished topic' are listed, name the one to remember. Then introduce the NEW topic using the strategy below.",
   reteach:
     "The student got it wrong or didn't know. Be kind and never make them feel bad. Walk through the question they just missed, step by step, using its worked solution, and put those steps on the board. Point at the exact step where their answer went wrong (the likely misconception) and say what the correct step gives. Explain it using the NEW strategy below — a different angle from before, not a repeat of the rule. If they said they didn't know, don't talk about a mistake; just explain more simply.",
   move_on_flagged:
-    "The student is still stuck after several explanations. Reassure them warmly, show the correct solution of the question they missed in one or two steps, say you'll come back to this later, then introduce the NEW topic using the strategy below.",
+    "The student is still stuck after several explanations. Reassure them warmly, show the correct solution of the question they missed in one or two steps, name the one thing to remember from this topic, say you'll come back to it later, then introduce the NEW topic using the strategy below.",
   answer_question:
-    "The student asked a question. Give the real reason, not just a restatement of the rule, in a way a Class 10 student can follow, and put the one key step on the board. Keep it related to the current topic. Do not give away the answer to the pending question.",
+    "The student asked a question. Give the real reason, not just a restatement of the rule, in a way a Class 10 student can follow, and put the one key step on the board. If they ask about a specific step or part of your explanation, explain exactly that part, using the same example as before. If they ask why YOU did something (moved on, re-explained, changed the question), answer truthfully from 'Your recent decisions' — never invent a reason. Do not give away the answer to the pending question.",
   redirect:
     "The student went off-topic. Respond in one friendly sentence and bring them back to the lesson.",
   clarify:
     "The student's reply wasn't a clear final answer (you couldn't make it out, they only gave working, or they contradicted themselves — if so, point out the contradiction gently). In one or two sentences, say kindly what you understood, and ask for their final answer. If they were mid-working, encourage them to finish the step.",
   complete:
     "The student has finished all six topics. Congratulate them, recap the journey in two sentences, and mention any topic flagged for review.",
+  review:
+    "A returning student is starting a new session. Welcome them back warmly in one sentence and say you'll start with a quick warm-up question on the topic below (name it), to check it stuck. Do not teach or give hints.",
+  repeat: "Not used: repeats are replayed without the LLM.",
 };
 
 const WORD_LIMIT: Record<TutorAction, number> = {
   teach: 90,
-  advance: 100,
+  advance: 120,
   reteach: 100,
-  move_on_flagged: 100,
+  move_on_flagged: 120,
   next_check: 35,
   answer_question: 90,
   redirect: 30,
   clarify: 30,
   complete: 70,
+  review: 40,
+  repeat: 0,
 };
 
 export interface ResponderContext {
@@ -112,6 +118,11 @@ export interface ResponderContext {
   history: HistoryLine[];
   studentText: string | null;
   flaggedTitles: string[];
+  recentDecisions: DecisionMemo[];
+  /** The misconception the student just showed they've overcome, if any. */
+  celebrate: Misconception | null;
+  /** Mistakes made in the topic that was just finished, for the recap. */
+  finishedTopicMistakes: { description: string; count: number; fixed: boolean }[];
 }
 
 export function responderMessages(ctx: ResponderContext): ChatMessage[] {
@@ -165,7 +176,18 @@ Worked solution of that question: ${ctx.answeredCheck.solution}`,
   if (ctx.pendingCheck) {
     parts.push(`Upcoming question (asked by the system after your speech — do not reveal its answer): ${ctx.pendingCheck.text} ${ctx.pendingCheck.math ?? ""}`);
   }
+  if (ctx.celebrate) {
+    parts.push(`Celebrate this specifically in one short sentence: the student just got right the kind of question they got wrong before (${ctx.celebrate.description}).`);
+  }
+  if (ctx.finishedTopicMistakes.length) {
+    parts.push(
+      `Mistakes in the finished topic (for the recap):\n${ctx.finishedTopicMistakes.map((m) => `- ${m.description} (${m.count}×${m.fixed ? ", later fixed" : ""})`).join("\n")}`,
+    );
+  }
   if (ctx.flaggedTitles.length) parts.push(`Topics flagged for review: ${ctx.flaggedTitles.join(", ")}`);
+  if (ctx.recentDecisions.length) {
+    parts.push(`Your recent decisions and their real reasons, oldest first (use these if the student asks why you did something):\n${ctx.recentDecisions.map((d) => `- ${d.action}: ${d.reason}`).join("\n")}`);
+  }
 
   parts.push(
     `Current board (id: content):\n${ctx.board.length ? ctx.board.map((b) => `- ${b.id} [${b.kind}]: ${b.content}`).join("\n") : "(empty)"}`,

@@ -69,12 +69,27 @@ export async function openingTurn(deps: EngineDeps, state: SessionState, history
       assessment: null,
       state,
       telemetry: { promptVersion: PROMPT_VERSION, calls: [], totalMs: Date.now() - started, degraded: false },
+      speechRate: 1,
     };
   }
 
+  if (state.review) {
+    const back = getSubconcept(c, state.review.returnTo);
+    const decision: Decision = {
+      action: "review",
+      reason: `New session for a returning student: starting with a retention check on "${sub.title}", mastered earlier, before continuing${back ? ` with "${back.title}"` : ""}.`,
+      fromSubconceptId: null,
+      toSubconceptId: sub.id,
+      strategyId: null,
+      checkId: check.id,
+    };
+    return respond(deps, { prevState: { ...state, board: [], pendingCheckId: null }, nextState: state, decision, assessment: null, studentText: null, history, calls: [], started });
+  }
+
+  const started_any = Object.values(state.progress).some((p) => p.checksAttempted > 0);
   const decision: Decision = {
     action: "teach",
-    reason: `New session: starting with the first topic, "${sub.title}", using strategy "${sub.strategies[state.strategyIndex].name}".`,
+    reason: `New session: starting with ${started_any ? "the first topic not yet mastered" : "the first topic"}, "${sub.title}", using strategy "${sub.strategies[state.strategyIndex].name}".`,
     fromSubconceptId: null,
     toSubconceptId: sub.id,
     strategyId: sub.strategies[state.strategyIndex].id,
@@ -95,8 +110,16 @@ export async function runTurn(deps: EngineDeps, state: SessionState, history: Hi
     return respond(deps, { prevState: state, nextState: state, decision, assessment: null, studentText, history, calls, started });
   }
 
-  const { assessment, telemetry } = await assess(deps, sub, check, studentText, history);
-  calls.push(telemetry);
+  // "Repeat that" / "slower please" needs no LLM: answer it instantly.
+  const quick = quickIntent(studentText);
+  let assessment: Assessment;
+  if (quick) {
+    assessment = quick;
+  } else {
+    const assessed = await assess(deps, sub, check, studentText, history);
+    assessment = assessed.assessment;
+    calls.push(assessed.telemetry);
+  }
   const { decision, state: nextState } = decide(c, state, assessment);
   return respond(deps, { prevState: state, nextState, decision, assessment, studentText, history, calls, started });
 }
@@ -127,6 +150,7 @@ async function assess(deps: EngineDeps, sub: Subconcept, check: CheckItem, stude
       note: value.note,
       correct: null,
       source: "llm",
+      ...(value.intent === "repeat" ? { slower: value.slower } : {}),
     };
   } else {
     assessment = heuristicExtract(check.answer, studentText);
@@ -136,6 +160,18 @@ async function assess(deps: EngineDeps, sub: Subconcept, check: CheckItem, stude
     if (assessment.correct) assessment.misconceptionId = null;
   }
   return { assessment, telemetry };
+}
+
+const REPEAT_RE = /\b(repeat|again|once more|one more time|didn'?t (hear|catch)|come again|pardon|dobara|phir se)\b/i;
+const SLOWER_RE = /\b(slow(er|ly)?|too fast|dheere)\b/i;
+
+/** Short, unambiguous requests to replay the last turn. Anything longer goes to the assessor. */
+export function quickIntent(text: string): Assessment | null {
+  const words = text.trim().split(/\s+/).length;
+  if (words > 8 || /\d|explain|why|how|what|step|part/i.test(text)) return null;
+  const slower = SLOWER_RE.test(text);
+  if (!slower && !REPEAT_RE.test(text)) return null;
+  return { intent: "repeat", slower, extracted: null, misconceptionId: null, note: "matched a repeat request locally", correct: null, source: "heuristic" };
 }
 
 function toExtracted(check: CheckItem, v: AssessorOutput): Assessment["extracted"] {
@@ -164,7 +200,7 @@ interface RespondArgs {
 }
 
 const RESERVED_IDS = new Set<string>([QUESTION_IDS.text, QUESTION_IDS.math, "title"]);
-const NEW_TOPIC_ACTIONS = new Set<TutorAction>(["teach", "advance", "move_on_flagged", "complete"]);
+const NEW_TOPIC_ACTIONS = new Set<TutorAction>(["teach", "advance", "move_on_flagged", "complete", "review"]);
 
 async function respond(deps: EngineDeps, a: RespondArgs): Promise<TurnResult> {
   const c = deps.curriculum;
@@ -174,6 +210,23 @@ async function respond(deps: EngineDeps, a: RespondArgs): Promise<TurnResult> {
 
   const prevSub = getSubconcept(c, prevState.subconceptId);
   const sub = getSubconcept(c, nextState.subconceptId);
+
+  // Repeat: replay the last thing the tutor said, word for word. No LLM, no state change.
+  if (action === "repeat") {
+    const last = [...a.history].reverse().find((h) => h.role === "tutor")?.text;
+    const pending = getCheck(sub, nextState.pendingCheckId);
+    return {
+      speech: last ?? (pending ? `Here's the question again. ${pending.spoken}` : "Let's keep going."),
+      boardOps: [],
+      board: prevState.board,
+      decision,
+      assessment: a.assessment,
+      state: nextState,
+      telemetry: { promptVersion: PROMPT_VERSION, calls: a.calls, totalMs: Date.now() - a.started, degraded: false },
+      speechRate: a.assessment?.slower ? 0.75 : 1,
+    };
+  }
+
   const answeredCheck = a.assessment?.intent === "answer" || a.assessment?.intent === "dont_know" ? getCheck(prevSub, prevState.pendingCheckId) : null;
   const pendingCheck = getCheck(sub, nextState.pendingCheckId);
   const strategy = sub?.strategies[nextState.strategyIndex] ?? null;
@@ -201,6 +254,17 @@ async function respond(deps: EngineDeps, a: RespondArgs): Promise<TurnResult> {
     history: a.history,
     studentText: a.studentText,
     flaggedTitles: c.subconcepts.filter((s) => nextState.progress[s.id]?.status === "needs_review").map((s) => s.title),
+    recentDecisions: prevState.recentDecisions ?? [],
+    celebrate: decision.celebrate ? (sub?.misconceptions.find((m) => m.id === decision.celebrate!.misconceptionId) ?? prevSub?.misconceptions.find((m) => m.id === decision.celebrate!.misconceptionId) ?? null) : null,
+    finishedTopicMistakes:
+      prevSub && prevSub.id !== sub?.id && ["advance", "move_on_flagged", "complete"].includes(action)
+        ? Object.entries(nextState.progress[prevSub.id]?.misconceptions ?? {})
+            .sort((x, y) => y[1] - x[1])
+            .flatMap(([id, n]) => {
+              const m = prevSub.misconceptions.find((mm) => mm.id === id);
+              return m ? [{ description: m.description, count: n, fixed: nextState.progress[prevSub.id].fixed.includes(id) }] : [];
+            })
+        : [],
   };
   const { value, telemetry } = await callJson({
     role: "responder",
@@ -230,15 +294,23 @@ async function respond(deps: EngineDeps, a: RespondArgs): Promise<TurnResult> {
     board: result.board,
     decision,
     assessment: a.assessment,
-    state: { ...nextState, board: result.board },
+    state: {
+      ...nextState,
+      board: result.board,
+      recentDecisions: [...(prevState.recentDecisions ?? []), { action, reason: decision.reason }].slice(-MEMORY),
+    },
     telemetry: {
       promptVersion: PROMPT_VERSION,
       calls: a.calls,
       totalMs: Date.now() - a.started,
       degraded: a.calls.some((call) => call.usedFallback),
     },
+    speechRate: 1,
   };
 }
+
+/** How many past decisions the tutor remembers (and can explain). */
+const MEMORY = 4;
 
 const normMath = (s: string) => s.replace(/\\[,;!]|\\quad|\s/g, "");
 
@@ -298,6 +370,8 @@ function leadIn(action: TutorAction): string {
     case "redirect":
     case "clarify":
       return "So, back to our question.";
+    case "review":
+      return "Here's your warm-up.";
     default:
       return "Now, your turn.";
   }
@@ -342,5 +416,9 @@ function cannedResponse(ctx: ResponderContext): { speech: string; board: BoardOp
       return { speech: "Sorry, I didn't catch that. Could you say your answer again?", board: [] };
     case "complete":
       return { speech: "Congratulations! You've worked through all six topics on quadratic equations.", board: [] };
+    case "review":
+      return { speech: `Welcome back! Let's start with a quick warm-up from ${ctx.subconcept?.title.toLowerCase() ?? "last time"}, to check it stuck.`, board: [] };
+    case "repeat":
+      return { speech: "", board: [] };
   }
 }
