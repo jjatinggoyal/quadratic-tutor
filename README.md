@@ -2,7 +2,7 @@
 
 A voice + whiteboard AI tutor for NCERT Class 10 **quadratic equations**. It teaches a concept, checks whether the student actually understood it, and then either moves on or re-teaches differently and checks again. Every decision comes with a stated reason.
 
-**Live:** https://quadratic-tutor.jatingoyal.workers.dev. It works best in Chrome or Edge for browser speech recognition. Other browsers fall back to server-side transcription, and typing always works.
+**Live:** https://quadratic-tutor.jatingoyal.com. It works best in Chrome or Edge for browser speech recognition. Other browsers fall back to server-side transcription, and typing always works.
 
 - `DESIGN.md`: data model, iterability, observability, latency, metrics, what's ugly.
 - Six subconcepts, each with 3 teaching strategies and 5–6 machine-checkable questions: `src/core/curriculum/quadratics.ts`.
