@@ -6,6 +6,7 @@ import { grade } from "../src/core/grader";
 import { callJson } from "../src/core/llm";
 import { getCheck, getSubconcept } from "../src/core/policy";
 import type { HistoryLine } from "../src/core/prompts";
+import type { SessionResponse, TurnView } from "../src/core/api";
 import type { CheckItem, TurnResult } from "../src/core/types";
 import { loadEnv, nodeDeps } from "../scripts/env";
 import { DIRECTIVE_TEXT, personas, type Directive, type Persona } from "./personas";
@@ -14,6 +15,11 @@ import { DIRECTIVE_TEXT, personas, type Directive, type Persona } from "./person
 //
 //   npm run sim                                  # all personas, 30 turns each
 //   npm run sim -- --personas sign_slipper,struggling --turns 40
+//   npm run sim -- --api https://<deployment> --sessions 3 --turns 12
+//       drives a deployed tutor over HTTP instead of in-process, as simulated
+//       students (flagged is_simulated, so /insights can include or exclude
+//       them), across several sessions each: every new session opens with a
+//       retention check, so this also exercises the return-visit path.
 //
 // Writes a JSON log + a readable Markdown transcript per session to sim/out/,
 // and prints a summary table. Useful for spotting loop pathologies (e.g. a
@@ -27,6 +33,8 @@ const opt = (name: string) => {
 const MAX_TURNS = Number(opt("turns") ?? 30);
 const SELECTED = opt("personas")?.split(",");
 const STUDENT_MODEL = loadEnv().STUDENT_MODEL ?? "openai/gpt-5.4-mini";
+const API = opt("api")?.replace(/\/$/, "");
+const SESSIONS = Number(opt("sessions") ?? 1);
 
 const StudentReply = z.object({ reply: z.string().min(1), my_answer: z.string().nullish() });
 
@@ -176,7 +184,79 @@ function agrees(d: Directive, r: TurnResult): boolean {
   }
 }
 
+// ---------------------------------------------------------------------------
+// API mode: same personas, the deployed Worker plays the tutor.
+
+async function api<T>(path: string, body: unknown): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`${API}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    if (res.ok) return (await res.json()) as T;
+    if (attempt >= 2 || res.status < 500) throw new Error(`${path}: HTTP ${res.status} ${await res.text()}`);
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
+async function studentSays(p: Persona, deps: { transport: EngineDeps["transport"] }, directive: Directive, check: CheckItem | null, board: string, history: HistoryLine[]) {
+  const { value } = await callJson({
+    role: "responder",
+    transport: deps.transport,
+    models: [STUDENT_MODEL, STUDENT_MODEL],
+    schema: StudentReply,
+    maxTokens: 150,
+    temperature: 0.9,
+    timeoutMs: 15000,
+    budgetMs: 30000,
+    messages: [
+      { role: "system", content: STUDENT_SYSTEM(p, directive, check) },
+      { role: "user", content: `Whiteboard:\n${board}\n\nConversation so far:\n${history.slice(-8).map((h) => `${h.role === "tutor" ? "Tutor" : "You"}: ${h.text}`).join("\n")}\n\nWhat do you say now?` },
+    ],
+  });
+  return value;
+}
+
+async function simulateViaApi(p: Persona, deps: { transport: EngineDeps["transport"] }) {
+  const rng = seededRng(7);
+  const studentId = `sim-${p.id}-${Math.random().toString(36).slice(2, 8)}`;
+  const summary = { persona: p.id, sessions: 0, turns: 0, mastered: 0, flagged: 0, reviewsPassed: 0, reviewsFailed: 0, gradedRight: 0, answered: 0 };
+  for (let n = 0; n < SESSIONS; n++) {
+    const start = await api<SessionResponse>("/api/session", { studentId, forceNew: n > 0, simulated: true });
+    summary.sessions++;
+    let view: TurnView = start.turn;
+    const history: HistoryLine[] = [{ role: "tutor", text: view.speech }];
+    for (let i = 0; i < MAX_TURNS && !view.complete; i++) {
+      const current = view.progress.find((r) => r.current);
+      const sub = getSubconcept(quadratics, current?.id ?? null);
+      const check = getCheck(sub, view.decision.checkId);
+      const directive = p.behave({ subconceptId: current?.id ?? "", reteachesOnTopic: current?.reteachCount ?? 0, rng });
+      const value = await studentSays(p, deps, directive, check, view.board.map((b) => `- ${b.content}`).join("\n"), history);
+      const said = value?.reply ?? "sorry, can you repeat that?";
+      const heard = p.channel ? p.channel(said, rng) : said;
+      view = await api<TurnView>("/api/turn", { sessionId: start.sessionId, clientTurnId: crypto.randomUUID(), text: heard, inputSource: "typed" });
+      history.push({ role: "student", text: heard }, { role: "tutor", text: view.speech });
+      summary.turns++;
+      const t = truth(check, value?.my_answer);
+      if (t !== null) {
+        summary.answered++;
+        if (view.assessment?.intent === "answer" && view.assessment.correct === t) summary.gradedRight++;
+      }
+    }
+    summary.mastered = view.progress.filter((r) => r.status === "mastered").length;
+    summary.flagged = view.progress.filter((r) => r.status === "needs_review").length;
+    summary.reviewsPassed = view.progress.reduce((a, r) => a + r.reviewsPassed, 0);
+    summary.reviewsFailed = view.progress.reduce((a, r) => a + r.reviewsFailed, 0);
+  }
+  return { ...summary, gradedRight: pct(summary.gradedRight, summary.answered) };
+}
+
 async function main() {
+  if (API) {
+    const { transport } = nodeDeps();
+    const chosen = personas.filter((p) => !SELECTED || SELECTED.includes(p.id));
+    console.log(`Simulating against ${API}: ${chosen.map((p) => p.id).join(", ")} · ${SESSIONS} session(s) × up to ${MAX_TURNS} turns`);
+    console.table(await Promise.all(chosen.map((p) => simulateViaApi(p, { transport }))));
+    console.log(`See ${API}/insights`);
+    return;
+  }
   const { transport, models } = nodeDeps();
   const deps: EngineDeps = { curriculum: quadratics, transport, models };
   const chosen = personas.filter((p) => !SELECTED || SELECTED.includes(p.id));
