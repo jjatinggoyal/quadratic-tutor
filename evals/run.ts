@@ -2,7 +2,7 @@ import katex from "katex";
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { z } from "zod";
 import { quadratics } from "../src/core/curriculum/quadratics";
-import { runTurn, type EngineDeps } from "../src/core/engine";
+import { openingTurn, runTurn, type EngineDeps } from "../src/core/engine";
 import { describeAnswer } from "../src/core/grader";
 import { callJson, resetBreakers } from "../src/core/llm";
 import { getCheck, getSubconcept } from "../src/core/policy";
@@ -61,7 +61,7 @@ async function runOnce(s: Scenario): Promise<RunOutcome> {
     ...(s.timeouts ? { timeouts: s.timeouts } : {}),
   };
   const before = s.state();
-  const r = await runTurn(deps, before, s.history ?? [], s.student);
+  const r = s.opening ? await openingTurn(deps, before, s.history ?? []) : await runTurn(deps, before, s.history ?? [], s.student);
   const failures = [...deterministicChecks(s, before, r)];
   if (s.expect.judge?.length && failures.length === 0) failures.push(...(await judge(s, before, r)));
   return { ok: failures.length === 0, failures, action: r.decision.action, speech: r.speech, totalMs: r.telemetry.totalMs };
@@ -98,7 +98,7 @@ function deterministicChecks(s: Scenario, before: ReturnType<Scenario["state"]>,
   for (const re of e.speechMustNot ?? []) if (re.test(r.speech)) f.push(`speech contains forbidden ${re}`);
   const pending = getCheck(getSubconcept(quadratics, r.state.subconceptId), r.state.pendingCheckId);
   let llmPart = r.speech;
-  if (pending && r.decision.action !== "complete" && r.decision.action !== "repeat") {
+  if (pending && !["complete", "repeat", "greet"].includes(r.decision.action)) {
     if (!r.speech.endsWith(pending.spoken)) f.push("speech does not end by asking the pending question");
     llmPart = r.speech.slice(0, r.speech.lastIndexOf(pending.spoken));
   }
@@ -191,7 +191,7 @@ async function main() {
   console.log(`Evals: ${selected.length} scenarios · prompt ${PROMPT_VERSION} · assessor ${models.assessor} · responder ${models.responder} · fallback ${models.fallback} · judge ${JUDGE_MODEL}\n`);
 
   // Scenarios with a fully fake transport are deterministic: one run is enough.
-  const deterministic = (s: Scenario) => !!s.transport && !s.id.includes("outage") && !s.id.includes("out-of-credit");
+  const deterministic = (s: Scenario) => (!!s.transport && !s.id.includes("outage") && !s.id.includes("out-of-credit")) || ["welcome-first", "not-ready-waits"].includes(s.id);
   const jobs = selected.flatMap((s) => Array.from({ length: deterministic(s) ? 1 : RUNS }, () => s));
   const t0 = Date.now();
   const results = await pool(jobs, CONCURRENCY, async (s) => ({ id: s.id, run: await runOnce(s).catch((err) => ({ ok: false, failures: [`crashed: ${err}`], action: "-", speech: "", totalMs: 0 })) }));

@@ -73,6 +73,8 @@ export async function openingTurn(deps: EngineDeps, state: SessionState, history
     };
   }
 
+  if (state.awaitingStart) return greeting(state, started, "welcome");
+
   if (state.review) {
     const back = getSubconcept(c, state.review.returnTo);
     const decision: Decision = {
@@ -108,6 +110,21 @@ export async function runTurn(deps: EngineDeps, state: SessionState, history: Hi
   if (!sub || !check) {
     const { decision } = decide(c, state, { intent: "unclear", extracted: null, misconceptionId: null, note: "", correct: null, source: "heuristic" });
     return respond(deps, { prevState: state, nextState: state, decision, assessment: null, studentText, history, calls, started });
+  }
+
+  // After the welcome: start the first lesson on any reply, unless they ask to wait.
+  if (state.awaitingStart) {
+    if (NOT_READY_RE.test(studentText) && studentText.trim().split(/\s+/).length <= 8) return greeting(state, started, "wait");
+    const decision: Decision = {
+      action: "teach",
+      reason: `Student is ready; starting with the first topic, "${sub.title}", using strategy "${sub.strategies[state.strategyIndex].name}".`,
+      fromSubconceptId: null,
+      toSubconceptId: sub.id,
+      strategyId: sub.strategies[state.strategyIndex].id,
+      checkId: check.id,
+    };
+    // pendingCheckId: null so the question is written to the board and the leak guard applies.
+    return respond(deps, { prevState: { ...state, pendingCheckId: null }, nextState: { ...state, awaitingStart: false }, decision, assessment: null, studentText, history, calls, started });
   }
 
   // "Repeat that" / "slower please" needs no LLM: answer it instantly.
@@ -160,6 +177,46 @@ async function assess(deps: EngineDeps, sub: Subconcept, check: CheckItem, stude
     if (assessment.correct) assessment.misconceptionId = null;
   }
   return { assessment, telemetry };
+}
+
+const NOT_READY_RE = /\b(no|not (yet|ready)|wait|hold on|one (sec|second|minute)|later|ruko|abhi nahi)\b/i;
+
+const WELCOME =
+  "Hi, I'm Tara, your maths tutor! Today we're learning quadratic equations, in six short steps. You can see them on the left. " +
+  "For each one, I'll explain on the whiteboard, then ask you a quick question to check it made sense. " +
+  "Answer by speaking or typing. You can stop me any time to ask a question, or say repeat. Ready to begin?";
+
+/** The welcome (and "take your time") turns: fixed text, so they play instantly with no LLM call. */
+function greeting(state: SessionState, started: number, kind: "welcome" | "wait"): TurnResult {
+  const board: BoardItem[] =
+    kind === "welcome"
+      ? applyBoardOps([], [
+          { op: "clear" },
+          { op: "write", id: "title", kind: "text", content: "Welcome!" },
+          { op: "write", id: "w_1", kind: "text", content: "Quadratic equations in 6 short steps" },
+          { op: "write", id: "w_2", kind: "math", content: "ax^2 + bx + c = 0" },
+          { op: "write", id: "w_3", kind: "text", content: "I explain → you try a question → we move on when it clicks" },
+          { op: "write", id: "w_4", kind: "text", content: "Speak or type · ask anything · say “repeat”" },
+          { op: "highlight", id: "w_2" },
+        ]).board
+      : state.board;
+  return {
+    speech: kind === "welcome" ? WELCOME : "No problem, take your time. Just say ready when you want to start.",
+    boardOps: [],
+    board,
+    decision: {
+      action: "greet",
+      reason: kind === "welcome" ? "First ever session: introducing Tara and how the lesson works, then waiting until the student is ready." : "Student asked to wait; holding the lesson until they're ready.",
+      fromSubconceptId: null,
+      toSubconceptId: state.subconceptId,
+      strategyId: null,
+      checkId: null,
+    },
+    assessment: null,
+    state: { ...state, board },
+    telemetry: { promptVersion: PROMPT_VERSION, calls: [], totalMs: Date.now() - started, degraded: false },
+    speechRate: 1,
+  };
 }
 
 const REPEAT_RE = /\b(repeat|again|once more|one more time|didn'?t (hear|catch)|come again|pardon|dobara|phir se)\b/i;
@@ -439,5 +496,7 @@ function cannedSpeechAndBoard(ctx: ResponderContext): { speech: string; board: B
       return { speech: `Welcome back! Let's start with a quick warm-up from ${ctx.subconcept?.title.toLowerCase() ?? "last time"}, to check it stuck.`, board: [] };
     case "repeat":
       return { speech: "", board: [] };
+    case "greet":
+      return { speech: WELCOME, board: [] };
   }
 }

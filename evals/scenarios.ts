@@ -1,6 +1,8 @@
 import type { LlmTransport } from "../src/core/llm";
 import type { HistoryLine } from "../src/core/prompts";
 import type { BoardItem, SessionState, StudentIntent, TurnResult, TutorAction } from "../src/core/types";
+import { quadratics } from "../src/core/curriculum/quadratics";
+import { initialState } from "../src/core/policy";
 import { garbageTransport, hangingTransport, outageTransport, outOfCreditTransport, scriptedTransport, stateAt } from "./fixtures";
 
 // The regression suite. Each scenario is one student turn from a fixed state,
@@ -40,6 +42,8 @@ export interface Scenario {
   catches: string; // the regression this scenario exists to catch
   state: () => SessionState;
   student: string;
+  /** Run the session-opening turn instead of a student turn (student is ignored). */
+  opening?: boolean;
   /** Conversation before this turn (oldest first). */
   history?: HistoryLine[];
   /** Override the transport (resilience scenarios). Receives the real one. */
@@ -54,6 +58,41 @@ const TAUGHT =
 const FAST_TIMEOUTS = { assessorMs: 300, responderMs: 300, assessorBudgetMs: 700, responderBudgetMs: 700 };
 
 export const scenarios: Scenario[] = [
+  // ------------------------------------------------------------- first contact
+  {
+    id: "welcome-first",
+    catches: "A new student being thrown straight into the lesson without a greeting or a moment to get ready.",
+    state: () => initialState(quadratics),
+    opening: true,
+    student: "",
+    expect: {
+      action: "greet",
+      custom: (r) =>
+        r.telemetry.calls.length ? "welcome used an LLM call (it should be instant)" : !r.state.awaitingStart ? "not waiting for the student" : r.board.some((b) => b.id === "q_text") ? "a question is already on the board" : !/ready/i.test(r.speech) ? "doesn't ask if they're ready" : null,
+    },
+  },
+  {
+    id: "ready-starts-lesson",
+    catches: "The lesson not starting once the student says they're ready.",
+    state: () => initialState(quadratics),
+    student: "yes, I'm ready",
+    expect: { action: "teach", custom: (r) => (r.state.awaitingStart ? "still waiting after 'ready'" : !r.board.some((b) => b.id === "q_text") ? "no question on the board" : null) },
+  },
+  {
+    id: "not-ready-waits",
+    catches: "The tutor starting the lesson while the student asked for a moment.",
+    state: () => initialState(quadratics),
+    student: "wait, one minute",
+    expect: { action: "greet", custom: (r) => (!r.state.awaitingStart ? "started anyway" : r.telemetry.calls.length ? "used an LLM call" : null) },
+  },
+  {
+    id: "ready-with-question",
+    catches: "A question in the student's first reply being ignored.",
+    state: () => initialState(quadratics),
+    student: "okay, but what does quadratic even mean?",
+    expect: { action: "teach", judge: ["Answers or acknowledges what 'quadratic' means (to do with the square / power 2) as part of starting the lesson."] },
+  },
+
   // ------------------------------------------------------------- grading
   {
     id: "stt-homophone-correct",

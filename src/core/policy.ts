@@ -59,6 +59,8 @@ export function stateFromProgress(c: Curriculum, saved: Record<string, Subconcep
     streak: 0,
     lastMisconception: null,
     review: null,
+    // Only a student who has never started anything gets the welcome.
+    awaitingStart: Object.values(progress).every((p) => p.status === "not_started" && p.checksAttempted === 0),
   };
   const start = c.subconcepts.find((s) => progress[s.id].status !== "mastered");
   return start ? enterSubconcept(base, start) : base;
@@ -99,6 +101,7 @@ export function rebaseState(saved: SessionState, c: Curriculum): SessionState {
     streak: saved.streak ?? 0,
     lastMisconception: saved.lastMisconception ?? null,
     review: saved.review ?? null,
+    awaitingStart: saved.awaitingStart ?? false,
     progress: Object.fromEntries(Object.entries(saved.progress).map(([id, p]) => [id, normaliseProgress(p)])),
   };
   if (state.curriculumVersion === c.version && state.curriculumId === c.id) return state;

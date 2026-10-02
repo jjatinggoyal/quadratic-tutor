@@ -69,7 +69,7 @@ Student's reply: """${studentText}"""`;
 
 const ACTION_BRIEF: Record<TutorAction, string> = {
   teach:
-    "Introduce the topic using the strategy below. Keep it short: one idea and one tiny example. Build the board step by step.",
+    "Introduce the topic using the strategy below. Keep it short: one idea and one tiny example. Build the board step by step. If the student just said something (e.g. replied to the welcome), acknowledge it in a few words first; if they asked a question, answer it in one sentence.",
   next_check:
     "The student got it right. Say it's right and, in one or two sentences, WHY it's right (the key step that makes it work), referring to the solution lines. Fill \"solution\" with the worked steps. Do not re-teach the whole topic.",
   advance:
@@ -89,6 +89,7 @@ const ACTION_BRIEF: Record<TutorAction, string> = {
   review:
     "A returning student is starting a new session. Welcome them back warmly in one sentence and say you'll start with a quick warm-up question on the topic below (name it), to check it stuck. Do not teach or give hints.",
   repeat: "Not used: repeats are replayed without the LLM.",
+  greet: "Not used: the welcome is fixed text.",
 };
 
 const WORD_LIMIT: Record<TutorAction, number> = {
@@ -103,6 +104,7 @@ const WORD_LIMIT: Record<TutorAction, number> = {
   complete: 70,
   review: 40,
   repeat: 0,
+  greet: 0,
 };
 
 export interface ResponderContext {

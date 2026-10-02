@@ -66,6 +66,7 @@ export function stateAt(
       [subconceptId]: { ...base.progress[subconceptId], status: "in_progress", reteachCount: o.reteachesHere ?? 0, misconceptions: o.misconceptionsHere ?? {} },
     },
     lastMisconception: o.lastMisconception ?? null,
+    awaitingStart: false,
     recentDecisions: o.recentDecisions ?? [],
   };
   if (!o.reviewOf) return positioned;

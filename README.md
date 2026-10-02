@@ -10,6 +10,7 @@ A voice + whiteboard AI tutor for NCERT Class 10 **quadratic equations**. It tea
 
 ## For the student
 
+- **A proper start.** A new student is greeted instantly (fixed text, no LLM wait). Tara explains how the lesson works and asks if they're ready. The lesson starts when they reply, and "wait" holds it.
 - **Talk or type.** Say "repeat that" or "slower please", or tap ↻ Repeat / 🐢 Slower, to hear the last turn again, word for word.
 - **Ask anything mid-question.** For example "explain the grouping step again", "what does product mean?", or "why did we move on?". The tutor answers from its real decision log, and the question stays open.
 - **Mistakes are remembered.** Each topic ends with a recap that names the student's own slip. Getting that kind of question right later earns a "✨ You fixed it" moment. The progress rail lists each topic's mistakes, which turn green once fixed.
@@ -74,8 +75,9 @@ npm run deploy                                     # build → remote migrations
 
 ## Evals: `npm run eval`
 
-27 single-turn scenarios (`evals/scenarios.ts`), each run 3×. A scenario passes at 2 of 3 runs. The command exits 1 on any **regression** versus `evals/baseline.json`.
+31 single-turn scenarios (`evals/scenarios.ts`), each run 3×. A scenario passes at 2 of 3 runs. The command exits 1 on any **regression** versus `evals/baseline.json`.
 
+- **First contact:** the welcome comes first and instantly; "ready" starts the lesson; "wait" holds it; a question in the first reply gets answered.
 - **Grading:** STT homophones, Hinglish, a single root given for a two-root equation, working with no final answer, a self-contradicting reply, and the "has x² so it's quadratic" trap.
 - **The loop:** a sign error leads to a targeted re-teach; mastery leads to the next topic; "just tell me" leads to a re-teach; a question mid-check keeps the question open; off-topic replies are redirected; a stuck student is flagged and the tutor moves on.
 - **Asking for help:** repeat and slower requests replay verbatim with no LLM; a long-winded repeat request; explaining one specific step; "why did you move on?" answered from the real reason.

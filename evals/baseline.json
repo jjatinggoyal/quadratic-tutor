@@ -33,6 +33,10 @@
     "primary-outage-fallback-model": true,
     "bad-board-ops": true,
     "openrouter-out-of-credit": true,
-    "correct-shows-why": true
+    "correct-shows-why": true,
+    "welcome-first": true,
+    "ready-starts-lesson": true,
+    "not-ready-waits": true,
+    "ready-with-question": true
   }
 }
