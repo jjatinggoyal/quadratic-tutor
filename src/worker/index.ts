@@ -2,7 +2,7 @@ import { progressRows, type DecisionLogRow, type SessionResponse, type TurnReque
 import { quadratics } from "../core/curriculum/quadratics";
 import { openingTurn, rebaseState, runTurn, stateFromProgress, type EngineDeps } from "../core/engine";
 import { startReview } from "../core/policy";
-import { OpenRouterTransport } from "../core/llm";
+import { groq, openRouter, RoutedTransport, type LlmTransport } from "../core/llm";
 import type { TurnResult } from "../core/types";
 import { ConflictError, TutorDb, type SessionRow } from "./db";
 import { computeInsights } from "./insights";
@@ -12,9 +12,11 @@ export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
   OPENROUTER_KEY: string;
+  GROQ_API_KEY?: string;
   MODEL_ASSESSOR: string;
   MODEL_RESPONDER: string;
   MODEL_FALLBACK: string;
+  MODEL_FALLBACK_2?: string;
   MODEL_STT: string;
   MODEL_STT_FALLBACK: string;
   SESSION_TIMEOUT_MIN?: string;
@@ -76,9 +78,14 @@ function deps(env: Env): EngineDeps {
   if (!env.OPENROUTER_KEY) throw new HttpError(500, "server misconfigured: OPENROUTER_KEY missing");
   return {
     curriculum,
-    transport: new OpenRouterTransport(env.OPENROUTER_KEY),
-    models: { assessor: env.MODEL_ASSESSOR, responder: env.MODEL_RESPONDER, fallback: env.MODEL_FALLBACK },
+    transport: transport(env),
+    models: { assessor: env.MODEL_ASSESSOR, responder: env.MODEL_RESPONDER, fallback: env.MODEL_FALLBACK, fallback2: env.MODEL_FALLBACK_2 },
   };
+}
+
+/** OpenRouter by default; "groq:"-prefixed models go to Groq when its key is set. */
+function transport(env: Env): LlmTransport {
+  return new RoutedTransport({ groq: env.GROQ_API_KEY ? groq(env.GROQ_API_KEY) : undefined }, openRouter(env.OPENROUTER_KEY));
 }
 
 // ---------------------------------------------------------------------------
@@ -158,8 +165,8 @@ async function stt(req: Request, env: Env): Promise<Response> {
   const body = await readJson<{ audio?: string }>(req);
   if (typeof body.audio !== "string" || !body.audio) throw new HttpError(400, "audio (base64 wav) is required");
   if (body.audio.length * 0.75 > MAX_AUDIO_BYTES) throw new HttpError(413, "audio too long");
-  const out = await transcribe(new OpenRouterTransport(env.OPENROUTER_KEY), [env.MODEL_STT, env.MODEL_STT_FALLBACK], body.audio);
-  console.log(JSON.stringify({ event: "stt", ok: out.text !== null, ms: out.ms, attempts: out.attempts }));
+  const out = await transcribe(env.GROQ_API_KEY ?? null, transport(env), [env.MODEL_STT, env.MODEL_STT_FALLBACK], body.audio);
+  console.log(JSON.stringify({ event: "stt", ok: out.text !== null, ms: out.ms, via: out.via, attempts: out.attempts }));
   if (out.text === null) throw new HttpError(503, "transcription unavailable; please type your answer");
   return json({ text: out.text, ms: out.ms });
 }

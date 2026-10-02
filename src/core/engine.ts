@@ -1,6 +1,6 @@
 import { applyBoardOps, QUESTION_IDS } from "./board";
 import { describeAnswer, grade, heuristicExtract } from "./grader";
-import { callJson, type LlmTransport, type ModelConfig } from "./llm";
+import { callJson, modelChain, type LlmTransport, type ModelConfig } from "./llm";
 import { nearDuplicate } from "./mathcheck";
 import { decide, getCheck, getSubconcept, initialState, rebaseState, stateFromProgress } from "./policy";
 import { assessorMessages, PROMPT_VERSION, responderMessages, type HistoryLine, type ResponderContext } from "./prompts";
@@ -131,7 +131,7 @@ async function assess(deps: EngineDeps, sub: Subconcept, check: CheckItem, stude
   const { value, telemetry } = await callJson({
     role: "assessor",
     transport: deps.transport,
-    models: [deps.models.assessor, deps.models.assessor, deps.models.fallback],
+    models: modelChain(deps.models.assessor, deps.models),
     messages: assessorMessages(sub, check, studentText, history),
     schema: AssessorOutput,
     maxTokens: 300,
@@ -269,7 +269,7 @@ async function respond(deps: EngineDeps, a: RespondArgs): Promise<TurnResult> {
   const { value, telemetry } = await callJson({
     role: "responder",
     transport: deps.transport,
-    models: [deps.models.responder, deps.models.responder, deps.models.fallback],
+    models: modelChain(deps.models.responder, deps.models),
     messages: responderMessages(ctx),
     schema: ResponderOutput,
     validate: (v) => leakProblem(v, pendingCheck, prevState.pendingCheckId),

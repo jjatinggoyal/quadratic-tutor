@@ -106,6 +106,16 @@ export function outageTransport(downModels: string[], rest: LlmTransport): LlmTr
   };
 }
 
+/** Every OpenRouter (unprefixed) model answers 402 Payment Required, as when the key runs out of credit. */
+export function outOfCreditTransport(rest: LlmTransport): LlmTransport {
+  return {
+    complete: async (req) => {
+      if (!/^[a-z]+:/.test(req.model)) throw new Error("http_402: Insufficient credits");
+      return rest.complete(req);
+    },
+  };
+}
+
 /** Returns a fixed JSON reply chosen by which role is asking (detected from the system prompt). */
 export function scriptedTransport(replies: { assessor: unknown; responder: unknown }): LlmTransport {
   return {

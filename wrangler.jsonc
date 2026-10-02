@@ -18,11 +18,13 @@
     }
   ],
   // Model choices are config, not code, so they can be changed (and rolled back)
-  // without touching the engine. OPENROUTER_KEY is a secret: `wrangler secret put OPENROUTER_KEY`.
+  // without touching the engine. OPENROUTER_KEY and GROQ_API_KEY are secrets: `wrangler secret put <NAME>`.
   "vars": {
     "MODEL_ASSESSOR": "google/gemini-3.5-flash-lite",
     "MODEL_RESPONDER": "openai/gpt-5.4",
-    "MODEL_FALLBACK": "anthropic/claude-haiku-4.5",
+    // Fallbacks go to a different provider first: Groq survives an OpenRouter outage or exhausted credit.
+    "MODEL_FALLBACK": "groq:qwen/qwen3.8-27b",
+    "MODEL_FALLBACK_2": "anthropic/claude-haiku-4.5",
     "MODEL_STT": "google/gemini-3.1-flash-lite",
     "MODEL_STT_FALLBACK": "google/gemini-3.5-flash-lite"
   },

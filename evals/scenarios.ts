@@ -1,7 +1,7 @@
 import type { LlmTransport } from "../src/core/llm";
 import type { HistoryLine } from "../src/core/prompts";
 import type { BoardItem, SessionState, StudentIntent, TurnResult, TutorAction } from "../src/core/types";
-import { garbageTransport, hangingTransport, outageTransport, scriptedTransport, stateAt } from "./fixtures";
+import { garbageTransport, hangingTransport, outageTransport, outOfCreditTransport, scriptedTransport, stateAt } from "./fixtures";
 
 // The regression suite. Each scenario is one student turn from a fixed state,
 // with the tutor behaviour we expect. They are chosen to cover the places a
@@ -347,6 +347,24 @@ export const scenarios: Scenario[] = [
     student: "yes it is a root",
     transport: (real, m) => outageTransport([m.assessor, m.responder], real),
     expect: { correct: true, action: "next_check", degraded: false },
+  },
+  {
+    id: "openrouter-out-of-credit",
+    catches: "An exhausted OpenRouter key taking the tutor down, or every turn re-discovering it model by model.",
+    state: () => stateAt("roots", "rt_two_yes"),
+    student: "yes, 4 minus 10 plus 6 is zero",
+    transport: (real) => outOfCreditTransport(real),
+    expect: {
+      correct: true,
+      action: "next_check",
+      degraded: false,
+      custom: (r) => {
+        const responder = r.telemetry.calls.find((c) => c.role === "responder");
+        if (!responder?.model?.startsWith("groq:")) return `responder served by ${responder?.model}, expected a groq: fallback`;
+        const networkTriesOnOpenRouter = r.telemetry.calls.flatMap((c) => c.attempts).filter((x) => !x.model.includes(":") && !x.error?.startsWith("provider_down")).length;
+        return networkTriesOnOpenRouter > 1 ? `${networkTriesOnOpenRouter} requests to OpenRouter after it said 402; expected 1, then skip` : null;
+      },
+    },
   },
   {
     id: "bad-board-ops",

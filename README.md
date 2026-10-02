@@ -23,7 +23,7 @@ mic ─► STT ─► ASSESSOR (LLM) ─► GRADER (code) ─► POLICY (code) �
             what did they say?   is it right?     what next + why    say it, draw it
 ```
 
-- **STT → LLM → TTS pipeline**, no realtime APIs. STT uses the browser's Web Speech API, or records audio and sends WAV to `/api/stt`, where an audio-capable model on OpenRouter transcribes it. TTS uses the browser's `speechSynthesis`, because OpenRouter has no TTS models.
+- **STT → LLM → TTS pipeline**, no realtime APIs. STT uses the browser's Web Speech API, or records audio and sends WAV to `/api/stt`. There, Groq Whisper (`whisper-large-v3-turbo`, ~0.2s) transcribes it, with an audio-capable model on OpenRouter as the fallback. TTS uses the browser's `speechSynthesis`, because OpenRouter has no TTS models.
 - **Assessor** (`gemini-3.5-flash-lite`): classifies the reply (answer / don't know / question / off-topic / unclear) and extracts the answer. It is prompted for speech-recognition noise ("minus for" → −4) and Hinglish. It never decides correctness.
 - **Grader** (`src/core/grader.ts`): compares the extracted answer with the curriculum's answer key. It handles fractions, decimals and unordered root sets.
 - **Policy** (`src/core/policy.ts`): a pure function `(state, assessment) → (decision, next state)`.
@@ -42,7 +42,8 @@ The LLM provider will time out, return garbage, or go down. Each stage handles t
 | Failure | Handling |
 |---|---|
 | Timeout | A per-attempt timeout plus an overall budget per call. The same model is not retried after a timeout; the next attempt goes to the fallback model. |
-| 5xx / outage | Attempts go primary → primary → fallback model on a different provider (`claude-haiku-4.5`). A circuit breaker skips a model after 3 consecutive failures. |
+| 5xx / outage | Attempts go primary → primary → **Groq** (`qwen3.8-27b`, a different provider) → `claude-haiku-4.5` on OpenRouter. A circuit breaker skips a model after 3 consecutive failures. |
+| Provider out of credit / bad key | A 401, 402 or 403 marks the whole provider down for 5 minutes, so every OpenRouter model is skipped and Groq serves the turn straight away. This isn't hypothetical: the OpenRouter key ran low during development. |
 | Garbage / wrong shape | Output is JSON-extracted and schema-validated with zod. A failure counts as a failed attempt. |
 | Valid but bad (answer leak) | A semantic validator rejects board content that uses the upcoming question's equation, or a sign-flipped copy of it. The model is retried with feedback. |
 | Everything fails | Assessor: a heuristic extractor parses spoken numbers and yes/no, so grading still works. Responder: canned scripts from the curriculum, one per strategy. The turn is marked `degraded` and the UI says so. |
@@ -56,6 +57,7 @@ The eval suite tests all of these with fault-injecting transports (`evals/fixtur
 ```bash
 npm install
 echo 'OPENROUTER_KEY=sk-or-...' > .env            # used by evals and sims
+echo 'GROQ_API_KEY=gsk_...' >> .env                # fallback LLM provider + Whisper STT
 cp .env .dev.vars                                  # used by `wrangler dev`
 npm run db:migrate:local
 npm run dev                                        # builds the SPA and serves Worker + assets on :8787
@@ -66,6 +68,7 @@ Deploy (Cloudflare Workers + D1 + static assets):
 ```bash
 npx wrangler d1 create quadratic-tutor             # once; put the id in wrangler.jsonc
 npx wrangler secret put OPENROUTER_KEY             # once
+npx wrangler secret put GROQ_API_KEY               # once
 npm run deploy                                     # build → remote migrations → wrangler deploy
 ```
 
@@ -92,6 +95,8 @@ The curriculum is linted before every run. The lint verifies each answer key by 
 npm run eval                                        # compare to baseline
 npm run eval -- --only sign-error-reteach --runs 5 --verbose
 MODEL_RESPONDER=openai/gpt-5.4-mini npm run eval    # would this model swap regress? (it does: 2 regressions)
+M=groq:qwen/qwen3.8-27b MODEL_ASSESSOR=$M MODEL_RESPONDER=$M JUDGE_MODEL=groq:openai/gpt-oss-120b npm run eval
+                                                    # how good is the fallback on its own? (25/26; no OpenRouter credit used)
 npm run eval -- --update-baseline
 ```
 

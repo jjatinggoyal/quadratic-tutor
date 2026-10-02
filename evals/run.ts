@@ -190,7 +190,9 @@ async function main() {
   const selected = scenarios.filter((s) => !ONLY || ONLY.includes(s.id));
   console.log(`Evals: ${selected.length} scenarios · prompt ${PROMPT_VERSION} · assessor ${models.assessor} · responder ${models.responder} · fallback ${models.fallback} · judge ${JUDGE_MODEL}\n`);
 
-  const jobs = selected.flatMap((s) => Array.from({ length: s.transport && !s.id.includes("outage") ? 1 : RUNS }, () => s));
+  // Scenarios with a fully fake transport are deterministic: one run is enough.
+  const deterministic = (s: Scenario) => !!s.transport && !s.id.includes("outage") && !s.id.includes("out-of-credit");
+  const jobs = selected.flatMap((s) => Array.from({ length: deterministic(s) ? 1 : RUNS }, () => s));
   const t0 = Date.now();
   const results = await pool(jobs, CONCURRENCY, async (s) => ({ id: s.id, run: await runOnce(s).catch((err) => ({ ok: false, failures: [`crashed: ${err}`], action: "-", speech: "", totalMs: 0 })) }));
 

@@ -58,14 +58,14 @@ Three kinds of change, and what each does to a student halfway through session 3
 | Change | Where it lives | Effect on an in-flight student |
 |---|---|---|
 | **Prompt** | `src/core/prompts.ts`, `PROMPT_VERSION` | Takes effect on their next turn. Nothing to migrate: prompts read the state, they don't own it. Every turn row records `prompt_version`, so quality can be compared before and after the change. |
-| **Model** | `wrangler.jsonc` `vars` (`MODEL_ASSESSOR`, `MODEL_RESPONDER`, `MODEL_FALLBACK`) | Same: next turn. Models are config, not code. `assessor_model` / `responder_model` are recorded per turn. |
+| **Model** | `wrangler.jsonc` `vars` (`MODEL_ASSESSOR`, `MODEL_RESPONDER`, `MODEL_FALLBACK`, `MODEL_FALLBACK_2`; a `groq:` prefix routes to Groq) | Same: next turn. Models are config, not code. `assessor_model` / `responder_model` are recorded per turn. |
 | **Curriculum** | `src/core/curriculum/quadratics.ts`, `version` | On load, `rebaseState()` reconciles the saved state with the new curriculum. Progress is kept by subconcept ID. Removed subconcepts are dropped. New ones appear as `not_started`. If the student's current subconcept or pending question still exists, they carry on exactly where they were. If not, they restart that subconcept cleanly (fresh question, first strategy). They never land on a question that no longer exists. |
 
 The rule that makes this safe: **never reuse an ID for different content.** If a question's meaning changes, it gets a new ID. The curriculum lint (`npm run lint:curriculum`) checks ID uniqueness, verifies every answer key by evaluating the equation, and rejects teaching material that contains a check's equation.
 
 **Rolling out a change**
 
-1. `npm run eval` against the change locally. The suite exits non-zero on any regression versus `evals/baseline.json`. For a model swap, run it with the model overridden, e.g. `MODEL_RESPONDER=… npm run eval`. This is how I picked the current models: `gpt-5.4-mini` as responder regressed two scenarios, and so did `gpt-5.4-nano` as assessor.
+1. `npm run eval` against the change locally. The suite exits non-zero on any regression versus `evals/baseline.json`. For a model swap, run it with the model overridden, e.g. `MODEL_RESPONDER=… npm run eval`. This is how I picked the current models: `gpt-5.4-mini` as responder regressed two scenarios, and so did `gpt-5.4-nano` as assessor. The fallback was picked the same way. With every role on Groq, `qwen3.8-27b` passed 25/26 and `gpt-oss-120b` passed 19/26, both judged by `gpt-oss-120b`, so Qwen became the fallback.
 2. `npm run sim` to check multi-turn behaviour (e.g. a persona that stops progressing).
 3. Deploy with Workers gradual deployments. The previous version keeps serving most traffic while the new one takes a small percentage. Watch the per-version dashboards (§3) split by `prompt_version`.
 4. **Rollback** is `wrangler rollback`. It is safe because state is forward- and backward-compatible: the old code reads the same `state_json`, and `rebaseState` handles both directions of a curriculum change.
@@ -137,7 +137,8 @@ So a student waits roughly 4–5 s from finishing speaking to hearing the tutor.
 2. **An instant, decision-aware acknowledgement.** After the assessor and policy (~1.3 s) we already know the outcome. Say a short pre-recorded or TTS phrase ("Not quite — let's look at it another way…", "That's right!") while the responder generates. The student hears something relevant in ~1.5 s. The board already shows the question and title immediately.
 3. **Skip the assessor when it isn't needed.** Many replies are trivially parseable ("yes", "3 and minus 4"). The heuristic extractor already exists. Use it when it gives a confident result, and call the LLM only for the rest. This saves ~1.2 s on a large share of turns.
 4. **Speculative responder.** For yes/no and choice questions, start "correct" and "wrong" responses in parallel with the assessor and discard the loser. This costs roughly 2× tokens and saves ~1.2 s.
-5. **Model and region.** A faster responder (the evals say `gpt-5.4-mini` is ~0.9 s faster but weaker on "why" questions) could be routed per action: the cheap model for `next_check` / `redirect` / `clarify`, the strong one for `reteach` / `answer_question`.
+5. **A faster primary.** With every role on Groq, `qwen3.8-27b` passed 25/26 scenarios at a **0.9 s** median turn, against ~3.8 s today. That run used a weaker judge (`gpt-oss-120b`), so it needs re-judging with `gpt-5.4` before trusting it. If it holds up, it is the single biggest latency win available, and it would be a model swap gated by the eval suite rather than an architecture change.
+6. **Model and region.** A faster responder (the evals say `gpt-5.4-mini` is ~0.9 s faster but weaker on "why" questions) could be routed per action: the cheap model for `next_check` / `redirect` / `clarify`, the strong one for `reteach` / `answer_question`.
 
 The UI already hides some of this: the pending question is on the board, "Tara is thinking…" shows immediately, and the student can barge in by tapping the mic while the tutor talks.
 

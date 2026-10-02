@@ -40,31 +40,41 @@ export interface LlmTransport {
 export interface ModelConfig {
   assessor: string;
   responder: string;
+  /** Tried after the primary; should be on a different provider (e.g. "groq:qwen/qwen3.8-27b"). */
   fallback: string;
+  /** Last resort, optional. */
+  fallback2?: string;
 }
 
-export class OpenRouterTransport implements LlmTransport {
+/** The order models are tried in for one call. */
+export function modelChain(primary: string, m: ModelConfig): string[] {
+  return [primary, primary, m.fallback, ...(m.fallback2 ? [m.fallback2] : [])];
+}
+
+/**
+ * Any OpenAI-compatible chat completions endpoint (OpenRouter, Groq).
+ * Model ids are passed through unchanged; routing happens in RoutedTransport.
+ */
+export class OpenAICompatibleTransport implements LlmTransport {
   constructor(
+    private baseUrl: string,
     private apiKey: string,
-    private appUrl = "https://quadratic-tutor",
+    private extraHeaders: Record<string, string> = {},
+    private extraBody: (model: string) => Record<string, unknown> = () => ({}),
   ) {}
 
   async complete(req: CompletionRequest): Promise<CompletionResponse> {
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    const res = await fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       signal: req.signal,
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": this.appUrl,
-        "X-Title": "Quadratic Tutor",
-      },
+      headers: { Authorization: `Bearer ${this.apiKey}`, "Content-Type": "application/json", ...this.extraHeaders },
       body: JSON.stringify({
         model: req.model,
         messages: req.messages,
         max_tokens: req.maxTokens,
         temperature: req.temperature,
         response_format: { type: "json_object" },
+        ...this.extraBody(req.model),
       }),
     });
     if (!res.ok) {
@@ -82,6 +92,38 @@ export class OpenRouterTransport implements LlmTransport {
     }
     return { text, tokensIn: data.usage?.prompt_tokens ?? 0, tokensOut: data.usage?.completion_tokens ?? 0 };
   }
+}
+
+export const openRouter = (apiKey: string) =>
+  new OpenAICompatibleTransport("https://openrouter.ai/api/v1", apiKey, { "HTTP-Referer": "https://quadratic-tutor", "X-Title": "Quadratic Tutor" });
+
+// gpt-oss on Groq is a reasoning model; low effort keeps it fast and inside max_tokens.
+export const groq = (apiKey: string) =>
+  new OpenAICompatibleTransport("https://api.groq.com/openai/v1", apiKey, {}, (model) => (model.includes("gpt-oss") ? { reasoning_effort: "low" } : {}));
+
+/**
+ * Routes by model-id prefix: "groq:openai/gpt-oss-120b" goes to Groq as
+ * "openai/gpt-oss-120b"; anything unprefixed goes to the default (OpenRouter).
+ * A provider without a key is simply absent, and its models fail fast.
+ */
+export class RoutedTransport implements LlmTransport {
+  constructor(
+    private providers: Record<string, LlmTransport | undefined>,
+    private defaultProvider: LlmTransport,
+  ) {}
+
+  complete(req: CompletionRequest): Promise<CompletionResponse> {
+    const { provider, model } = splitModel(req.model);
+    if (provider === "openrouter") return this.defaultProvider.complete(req);
+    const t = this.providers[provider];
+    if (!t) return Promise.reject(new LlmError("no_provider", `no API key configured for ${provider}`));
+    return t.complete({ ...req, model });
+  }
+}
+
+export function splitModel(id: string): { provider: string; model: string } {
+  const m = id.match(/^([a-z]+):(.+)$/);
+  return m ? { provider: m[1], model: m[2] } : { provider: "openrouter", model: id };
 }
 
 export class LlmError extends Error {
@@ -111,7 +153,14 @@ function recordResult(model: string, ok: boolean, now: number) {
 }
 export function resetBreakers() {
   breaker.clear();
+  providerDown.clear();
 }
+
+// Out of credit / bad key is a provider-wide condition: skip every model on that
+// provider for a while instead of discovering it again model by model, turn by turn.
+const providerDown = new Map<string, number>();
+const PROVIDER_COOLDOWN_MS = 5 * 60_000;
+const PROVIDER_FATAL = /\b(http_401|http_402|http_403|no_provider)\b/;
 
 /** Pull the first JSON object out of a response, tolerating code fences and chatter. */
 export function extractJson(text: string): unknown {
@@ -162,6 +211,11 @@ export async function callJson<T>(opts: JsonCallOptions<T>): Promise<{ value: T 
     // Retrying the same model right after it timed out just doubles the wait; go to the next model instead.
     const prev = telemetry.attempts[telemetry.attempts.length - 1];
     if (i > 0 && opts.models[i - 1] === model && prev?.error === "timeout") continue;
+    const provider = splitModel(model).provider;
+    if ((providerDown.get(provider) ?? 0) > Date.now()) {
+      telemetry.attempts.push({ model, ok: false, ms: 0, error: `provider_down:${provider}` });
+      continue;
+    }
     if (breakerOpen(model, Date.now())) {
       telemetry.attempts.push({ model, ok: false, ms: 0, error: "circuit_open" });
       continue;
@@ -198,6 +252,7 @@ export async function callJson<T>(opts: JsonCallOptions<T>): Promise<{ value: T 
     } catch (err) {
       const error = ctrl.signal.aborted ? "timeout" : err instanceof LlmError ? err.message : String(err);
       recordResult(model, false, Date.now());
+      if (PROVIDER_FATAL.test(error)) providerDown.set(provider, Date.now() + PROVIDER_COOLDOWN_MS);
       telemetry.attempts.push({ model, ok: false, ms: Date.now() - t0, error: error.slice(0, 300) });
     } finally {
       clearTimeout(timer);
