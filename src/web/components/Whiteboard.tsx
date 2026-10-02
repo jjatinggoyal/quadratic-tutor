@@ -49,7 +49,7 @@ function Line({ item }: { item: BoardItem }) {
   const highlighted = !!item.highlight;
   const math = useMemo(() => (item.kind === "math" ? renderMath(item.content, term) : null), [item.kind, item.content, term]);
   const lineHl = highlighted && (item.kind === "math" ? math!.lineHighlight || !term : !term || !item.content.includes(term));
-  const cls = ["board-line", `board-${item.kind}`, item.id === "title" ? "board-title" : "", item.id.startsWith("q_") ? "board-question" : "", lineHl ? "line-hl" : ""]
+  const cls = ["board-line", `board-${item.kind}`, item.id === "title" ? "board-title" : "", item.id.startsWith("q_") ? "board-question" : "", item.id.startsWith("why_") ? "board-why" : "", item.id === "why_title" ? "board-why-title" : "", lineHl ? "line-hl" : ""]
     .filter(Boolean)
     .join(" ");
 

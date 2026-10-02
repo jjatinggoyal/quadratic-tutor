@@ -25,8 +25,12 @@ export const BoardOpSchema = z.discriminatedUnion("op", [
   z.object({ op: z.literal("clear") }),
 ]);
 
+const SolutionLine = z.object({ kind: z.enum(["text", "math"]), content: z.string().min(1).max(200) });
+
 export const ResponderOutput = z.object({
   speech: z.string().min(1).max(1500),
   board: z.array(BoardOpSchema).max(8).nullish().transform((v) => v ?? []),
+  /** After a correct answer: the worked solution of the question just answered, shown as "Why that's right". */
+  solution: z.array(SolutionLine).max(3).nullish().transform((v) => v ?? []),
 });
 export type ResponderOutput = z.infer<typeof ResponderOutput>;

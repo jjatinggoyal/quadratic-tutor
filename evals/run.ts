@@ -153,7 +153,7 @@ System grading: ${r.assessment?.correct === null ? "not an answer" : r.assessmen
 Tutor's spoken reply:
 """${r.speech}"""
 
-Tutor's whiteboard after the turn:
+Tutor's whiteboard after the turn (lines starting "✓ Why that's right" and the lines after it are the worked solution of the question just answered):
 ${r.board.map((b) => `- ${b.content}`).join("\n")}
 
 Criteria:

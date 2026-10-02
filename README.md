@@ -74,7 +74,7 @@ npm run deploy                                     # build → remote migrations
 
 ## Evals: `npm run eval`
 
-25 single-turn scenarios (`evals/scenarios.ts`), each run 3×. A scenario passes at 2 of 3 runs. The command exits 1 on any **regression** versus `evals/baseline.json`.
+27 single-turn scenarios (`evals/scenarios.ts`), each run 3×. A scenario passes at 2 of 3 runs. The command exits 1 on any **regression** versus `evals/baseline.json`.
 
 - **Grading:** STT homophones, Hinglish, a single root given for a two-root equation, working with no final answer, a self-contradicting reply, and the "has x² so it's quadratic" trap.
 - **The loop:** a sign error leads to a targeted re-teach; mastery leads to the next topic; "just tell me" leads to a re-teach; a question mid-check keeps the question open; off-topic replies are redirected; a stuck student is flagged and the tutor moves on.

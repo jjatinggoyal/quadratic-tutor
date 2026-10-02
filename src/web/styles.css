@@ -180,3 +180,7 @@ mark.hl { color: inherit; }
 .bar-fill.ok { background: var(--ok); }
 .bar-fill.warn { background: var(--warn); }
 .bar-fill.bad { background: var(--bad); }
+
+/* "Why that's right" block after a correct answer */
+.board-why { border-left: 3px solid var(--ok); padding-left: 12px; background: var(--ok-soft); border-radius: 0 6px 6px 0; }
+.board-text.board-why-title { color: var(--ok); font-weight: 700; font-size: 18px; }

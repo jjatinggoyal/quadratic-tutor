@@ -1,10 +1,12 @@
 import type { BoardItem, BoardOp } from "./types";
 
-export const MAX_BOARD_ITEMS = 10;
+export const MAX_BOARD_ITEMS = 12;
 export const QUESTION_IDS = { text: "q_text", math: "q_math" } as const;
 
 const isQuestion = (i: BoardItem) => i.id === QUESTION_IDS.text || i.id === QUESTION_IDS.math;
-const isPinned = (i: BoardItem) => isQuestion(i) || i.id === "title";
+/** "Why that's right" lines from the turn that just happened. */
+export const isWhy = (i: { id: string }) => i.id.startsWith("why_");
+const isPinned = (i: BoardItem) => isQuestion(i) || i.id === "title" || isWhy(i);
 
 /**
  * Apply ops to a board. Highlights last one turn: they are cleared before the

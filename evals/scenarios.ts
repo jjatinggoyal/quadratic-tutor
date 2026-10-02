@@ -112,6 +112,26 @@ export const scenarios: Scenario[] = [
     },
   },
   {
+    id: "correct-shows-why",
+    catches: "A correct answer being accepted without showing why it is right (the student may have guessed).",
+    state: () => stateAt("factorisation", "fa_monic_neg"),
+    student: "5 and minus 2",
+    expect: {
+      intent: "answer",
+      correct: true,
+      action: "next_check",
+      board: (items) => {
+        const why = items.filter((i) => i.id.startsWith("why_"));
+        if (!items.some((i) => i.id === "why_title")) return "no \"Why that's right\" block on the board";
+        if (why.filter((i) => /^why_\d/.test(i.id)).length === 0) return "why block has no solution lines";
+        const qi = items.findIndex((i) => i.id === "q_text");
+        if (qi >= 0 && items.findIndex((i) => i.id === "why_title") > qi) return "why block is below the next question";
+        return null;
+      },
+      judge: ["The board's 'Why that's right' lines and the speech show why 5 and -2 are correct (factorising x^2 - 3x - 10 = (x - 5)(x + 2), or substituting back), not just that it is correct."],
+    },
+  },
+  {
     id: "mastery-advances",
     catches: "The tutor failing to move on after mastery, or not actually starting the next topic.",
     state: () => stateAt("roots", "rt_neg_three_yes", { correctInARow: 1 }),

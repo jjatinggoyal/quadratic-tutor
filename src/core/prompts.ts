@@ -4,7 +4,7 @@ import type { Assessment, BoardItem, CheckItem, Decision, DecisionMemo, Misconce
 
 // Bump whenever either prompt changes. It is stored on every turn so a quality
 // change can be traced to a prompt change (see DESIGN.md, Observability).
-export const PROMPT_VERSION = "p-2026-10-02.1";
+export const PROMPT_VERSION = "p-2026-10-02.2";
 
 export interface HistoryLine {
   role: "student" | "tutor";
@@ -71,9 +71,9 @@ const ACTION_BRIEF: Record<TutorAction, string> = {
   teach:
     "Introduce the topic using the strategy below. Keep it short: one idea and one tiny example. Build the board step by step.",
   next_check:
-    "The student got it right. Confirm briefly and specifically what they did right (one sentence). Do not re-teach.",
+    "The student got it right. Say it's right and, in one or two sentences, WHY it's right (the key step that makes it work), referring to the solution lines. Fill \"solution\" with the worked steps. Do not re-teach the whole topic.",
   advance:
-    "The student has mastered the previous topic (or, if the decision says so, passed a warm-up check on an earlier topic). Congratulate them in one sentence and recap the finished topic in one sentence — if 'Mistakes in the finished topic' are listed, name the one to remember. Then introduce the NEW topic using the strategy below.",
+    "The student has mastered the previous topic (or, if the decision says so, passed a warm-up check on an earlier topic). Fill \"solution\" with the worked steps of the question they just got right, and say in one sentence why their answer is right. Congratulate them in one sentence and recap the finished topic in one sentence — if 'Mistakes in the finished topic' are listed, name the one to remember. Then introduce the NEW topic using the strategy below.",
   reteach:
     "The student got it wrong or didn't know. Be kind and never make them feel bad. Walk through the question they just missed, step by step, using its worked solution, and put those steps on the board. Point at the exact step where their answer went wrong (the likely misconception) and say what the correct step gives. Explain it using the NEW strategy below — a different angle from before, not a repeat of the rule. If they said they didn't know, don't talk about a mistake; just explain more simply.",
   move_on_flagged:
@@ -93,10 +93,10 @@ const ACTION_BRIEF: Record<TutorAction, string> = {
 
 const WORD_LIMIT: Record<TutorAction, number> = {
   teach: 90,
-  advance: 120,
+  advance: 135,
   reteach: 100,
   move_on_flagged: 120,
-  next_check: 35,
+  next_check: 55,
   answer_question: 90,
   redirect: 30,
   clarify: 30,
@@ -128,7 +128,7 @@ export interface ResponderContext {
 export function responderMessages(ctx: ResponderContext): ChatMessage[] {
   const system = `You are Tara, a warm, encouraging maths tutor teaching an Indian Class 10 student (NCERT) through VOICE and a WHITEBOARD.
 
-Output a single JSON object: {"speech": string, "board": BoardOp[]}.
+Output a single JSON object: {"speech": string, "board": BoardOp[], "solution": SolutionLine[]}.
 
 speech — read aloud by text-to-speech:
 - Plain spoken English. No LaTeX, no symbols like ^, /, *, √ or =. Say "x squared", "b squared minus 4 a c", "3 by 2", "equals".
@@ -144,7 +144,11 @@ board — a list of operations on the whiteboard:
 - {"op":"clear"} only if the board is cluttered and you are starting a fresh explanation.
 - At most 4 writes per turn. Keep each line short. Re-using an id overwrites that line.
 - Highlight at most one or two things per turn: the one your speech is focusing on.
-- The lines "title", "q_text" and "q_math" belong to the system (topic title and upcoming question). Never write them or copy them; you may highlight them.`;
+- The lines "title", "q_text" and "q_math" belong to the system (topic title and upcoming question). Never write them or copy them; you may highlight them.
+
+solution — ONLY when the student just answered correctly; otherwise []:
+- 1 to 3 lines, [{"kind":"math","content":"<KaTeX>"}, …], that work through the question they just answered and show WHY their answer is right: the key step(s), ending with the answer and \\checkmark. Example for "solve x^2 + 2x - 15 = 0": [{"kind":"math","content":"x^2 + 2x - 15 = (x+5)(x-3)"}, {"kind":"math","content":"x + 5 = 0 \\Rightarrow x = -5,\\quad x - 3 = 0 \\Rightarrow x = 3 \\;\\checkmark"}].
+- The system shows these as a "Why that's right" block on the board, so don't also write them in "board".`;
 
   const parts: string[] = [];
   parts.push(`ACTION: ${ctx.action} — ${ACTION_BRIEF[ctx.action]}`);

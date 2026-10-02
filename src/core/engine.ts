@@ -1,4 +1,4 @@
-import { applyBoardOps, QUESTION_IDS } from "./board";
+import { applyBoardOps, isWhy, QUESTION_IDS } from "./board";
 import { describeAnswer, grade, heuristicExtract } from "./grader";
 import { callJson, modelChain, type LlmTransport, type ModelConfig } from "./llm";
 import { nearDuplicate } from "./mathcheck";
@@ -233,6 +233,8 @@ async function respond(deps: EngineDeps, a: RespondArgs): Promise<TurnResult> {
 
   // 1. System board ops: fresh board + title for a new topic, then the pending question.
   const pre: BoardOp[] = [];
+  // Last turn's "why that's right" block goes once the student has answered the next question.
+  if (answeredCheck) pre.push(...prevState.board.filter(isWhy).map((b) => ({ op: "remove" as const, id: b.id })));
   if (NEW_TOPIC_ACTIONS.has(action)) {
     pre.push({ op: "clear" }, { op: "write", id: "title", kind: "text", content: sub?.title ?? "All topics complete" });
   }
@@ -272,7 +274,7 @@ async function respond(deps: EngineDeps, a: RespondArgs): Promise<TurnResult> {
     models: modelChain(deps.models.responder, deps.models),
     messages: responderMessages(ctx),
     schema: ResponderOutput,
-    validate: (v) => leakProblem(v, pendingCheck, prevState.pendingCheckId),
+    validate: (v) => leakProblem({ board: [...v.board, ...v.solution.map((l, i) => ({ op: "write" as const, id: `why_${i}`, ...l }))] }, pendingCheck, prevState.pendingCheckId),
     maxTokens: 900,
     temperature: 0.5,
     timeoutMs: t.responderMs,
@@ -282,7 +284,20 @@ async function respond(deps: EngineDeps, a: RespondArgs): Promise<TurnResult> {
 
   const out = value ?? cannedResponse(ctx);
   const llmOps = sanitiseLlmOps(out.board, board);
-  const result = applyBoardOps(board, llmOps);
+
+  // 3. After a correct answer, show WHY it was right: the worked solution of that question.
+  const whyOps: BoardOp[] = [];
+  if (answeredCheck && a.assessment?.correct) {
+    const lines = out.solution.length ? out.solution : [{ kind: "text" as const, content: answeredCheck.solution }];
+    whyOps.push({ op: "write", id: "why_title", kind: "text", content: `✓ Why that's right: ${answeredCheck.text}` });
+    if (answeredCheck.math) whyOps.push({ op: "write", id: "why_q", kind: "math", content: answeredCheck.math });
+    lines.forEach((l, i) => whyOps.push({ op: "write", id: `why_${i + 1}`, kind: l.kind, content: l.content }));
+  }
+  const applied = applyBoardOps(board, [...llmOps, ...whyOps]);
+  // On a new topic the "why" block sits at the top, above the fresh lesson; otherwise it follows the lesson.
+  const result = NEW_TOPIC_ACTIONS.has(action)
+    ? { ...applied, board: [...applied.board.filter(isWhy), ...applied.board.filter((b) => !isWhy(b))] }
+    : applied;
 
   const speech = [cleanSpeech(out.speech), pendingCheck && action !== "complete" ? `${leadIn(action)} ${pendingCheck.spoken}` : ""]
     .filter(Boolean)
@@ -354,7 +369,7 @@ function questionBoardOps(board: BoardItem[], check: CheckItem | null, changed: 
 function sanitiseLlmOps(ops: BoardOp[], board: BoardItem[]): BoardOp[] {
   return ops.flatMap((op): BoardOp[] => {
     if (op.op === "clear") return board.filter((b) => !RESERVED_IDS.has(b.id)).map((b) => ({ op: "remove", id: b.id }));
-    if (op.op === "write" && RESERVED_IDS.has(op.id)) return [];
+    if (op.op === "write" && (RESERVED_IDS.has(op.id) || isWhy(op))) return [];
     if (op.op === "remove") return [];
     // Plain-text lines aren't rendered as LaTeX; make "x^2" read as "x²".
     if (op.op === "write" && op.kind === "text") return [{ ...op, content: op.content.replace(/\^2/g, "²").replace(/\^3/g, "³") }];
@@ -392,7 +407,11 @@ export function cleanSpeech(s: string): string {
 // Canned responses: the tutor keeps teaching from curriculum scripts when the
 // LLM is unavailable. Less personal, still correct.
 
-function cannedResponse(ctx: ResponderContext): { speech: string; board: BoardOp[] } {
+function cannedResponse(ctx: ResponderContext): { speech: string; board: BoardOp[]; solution: { kind: "text" | "math"; content: string }[] } {
+  return { solution: [], ...cannedSpeechAndBoard(ctx) };
+}
+
+function cannedSpeechAndBoard(ctx: ResponderContext): { speech: string; board: BoardOp[] } {
   const script = ctx.strategy?.fallback;
   const scriptOps: BoardOp[] = (script?.board ?? []).map((b, i) => ({ op: "write", id: `fb_${i + 1}`, kind: b.kind, content: b.content }));
   const missed = ctx.answeredCheck ? ` The answer was ${describeAnswer(ctx.answeredCheck.answer)}.` : "";
