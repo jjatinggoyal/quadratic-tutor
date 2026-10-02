@@ -6,6 +6,15 @@ A voice + whiteboard AI tutor for NCERT Class 10 **quadratic equations**. It tea
 
 - `DESIGN.md`: data model, iterability, observability, latency, metrics, what's ugly.
 - Six subconcepts, each with 3 teaching strategies and 5–6 machine-checkable questions: `src/core/curriculum/quadratics.ts`.
+- **`/insights`**: what the turn log says. Re-teach success, mastery funnel, which explanations work, common mistakes, hardest questions, retention, drop-off, and per-version quality and latency.
+
+## For the student
+
+- **Talk or type.** Say "repeat that" or "slower please", or tap ↻ Repeat / 🐢 Slower, to hear the last turn again, word for word.
+- **Ask anything mid-question.** For example "explain the grouping step again", "what does product mean?", or "why did we move on?". The tutor answers from its real decision log, and the question stays open.
+- **Mistakes are remembered.** Each topic ends with a recap that names the student's own slip. Getting that kind of question right later earns a "✨ You fixed it" moment. The progress rail lists each topic's mistakes, which turn green once fixed.
+- **Sessions.** After 30 minutes away, the next visit is a new numbered session. It opens with a warm-up question from the last mastered topic, to check it stuck. If it didn't, that topic is re-taught first.
+- A streak counter, a decisions panel ("why the tutor did that") and a transcript.
 
 ## How a turn works
 
@@ -62,10 +71,12 @@ npm run deploy                                     # build → remote migrations
 
 ## Evals: `npm run eval`
 
-16 single-turn scenarios (`evals/scenarios.ts`), each run 3×. A scenario passes at 2 of 3 runs. The command exits 1 on any **regression** versus `evals/baseline.json`.
+25 single-turn scenarios (`evals/scenarios.ts`), each run 3×. A scenario passes at 2 of 3 runs. The command exits 1 on any **regression** versus `evals/baseline.json`.
 
 - **Grading:** STT homophones, Hinglish, a single root given for a two-root equation, working with no final answer, a self-contradicting reply, and the "has x² so it's quadratic" trap.
 - **The loop:** a sign error leads to a targeted re-teach; mastery leads to the next topic; "just tell me" leads to a re-teach; a question mid-check keeps the question open; off-topic replies are redirected; a stuck student is flagged and the tutor moves on.
+- **Asking for help:** repeat and slower requests replay verbatim with no LLM; a long-winded repeat request; explaining one specific step; "why did you move on?" answered from the real reason.
+- **Memory:** celebrating a fixed mistake; a recap that names the mistake; passing and failing a retention check.
 - **Resilience:** hung provider, garbage output, primary-model outage, malicious board ops.
 
 Each run checks, deterministically:
@@ -88,6 +99,8 @@ npm run eval -- --update-baseline
 
 An LLM plays the student and the real engine plays the tutor, for six personas: quick learner, sign-slipper, struggling, distracted, Hinglish speaker, and noisy mic. The noisy-mic persona corrupts replies the way STT does. Each persona's behaviour on each turn (right / wrong / don't know / question / off-topic) is decided in code from its probabilities, and students "learn" after re-teaches. The LLM only voices that behaviour. Otherwise it answers everything correctly.
 
+`npm run sim -- --api <url> --sessions 3` runs the same personas against a **deployed** tutor over HTTP instead. They run as flagged simulated students across several sessions, so return visits and retention checks get exercised too. `/insights` can include or exclude them.
+
 Output is a Markdown transcript plus JSON per session in `sim/out/`, and a summary table:
 - mastered / flagged topics, re-teaches and redirects
 - `gradedRight`: tutor grading versus the student's own stated answer
@@ -103,8 +116,8 @@ src/core/        pure TypeScript: runs in the Worker, the evals and the simulato
   grader.ts      answer checking + heuristic extraction
   prompts.ts     assessor/responder prompts, PROMPT_VERSION
   llm.ts         OpenRouter client: timeouts, retries, fallback model, circuit breaker, validation
-src/worker/      Cloudflare Worker: HTTP API, D1 persistence, STT endpoint
-src/web/         React SPA: whiteboard (KaTeX), voice I/O, progress rail, decision log
+src/worker/      Cloudflare Worker: HTTP API, D1 persistence, STT endpoint, insights queries
+src/web/         React SPA: whiteboard (KaTeX), voice I/O, progress rail, decision log, /insights
 migrations/      D1 schema
 evals/           regression suite, curriculum lint, fault-injecting transports
 sim/             simulated students

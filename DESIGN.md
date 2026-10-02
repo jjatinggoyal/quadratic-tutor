@@ -13,14 +13,18 @@ The LLM never decides whether an answer is right or whether to move on. The asse
 
 ## 1. Data model
 
-D1 (SQLite), four tables. Full DDL: `migrations/0001_init.sql`.
+D1 (SQLite), four tables. Full DDL: `migrations/0001_init.sql` and `0002_sessions_memory_insights.sql`.
 
 ```
-students            (id PK, display_name, created_at)
+students            (id PK, display_name, is_simulated, created_at)
 subconcept_progress (student_id, subconcept_id, status, checks_attempted, checks_correct,
-                     reteach_count, strategies_used JSON, first_seen_at, mastered_at, updated_at)
+                     reteach_count, strategies_used JSON,
+                     misconceptions JSON {id: count}, fixed JSON [id],        -- the student's own mistakes
+                     reviews_passed, reviews_failed,                          -- retention checks
+                     first_seen_at, mastered_at, updated_at)
                      PK (student_id, subconcept_id)
-sessions            (id PK, student_id, status active|completed, curriculum_id, curriculum_version,
+sessions            (id PK, student_id, session_number, status active|completed,
+                     end_reason finished|inactive|restarted, curriculum_id, curriculum_version,
                      state_json, turn_count, created_at, updated_at)
 turns               (id PK, session_id, seq, client_turn_id, created_at,
                      student_text, input_source,                     -- what came in
@@ -30,13 +34,16 @@ turns               (id PK, session_id, seq, client_turn_id, created_at,
                      tutor_speech, board_ops_json,                   -- what we did
                      prompt_version, curriculum_version, assessor_model, responder_model,
                      assessor_ms, responder_ms, total_ms, tokens_in, tokens_out,
-                     degraded, llm_attempts_json, client_timings_json)
+                     degraded, llm_attempts_json, client_timings_json,
+                     is_review, fixed_misconception)
                      UNIQUE (session_id, seq), UNIQUE (session_id, client_turn_id)
 ```
 
 **Why this shape**
 
-- **Progress lives in two places on purpose, with one owner each.** `subconcept_progress` is the long-lived answer to "what does this student know?". It spans sessions and is what the progress rail shows. `sessions.state_json` is the engine's full working state (`SessionState` in `src/core/types.ts`): current subconcept, pending question, which strategy we're on, how many re-teaches, the board. Resume is exact because we restore that snapshot, not reconstruct it. A new session is seeded from `subconcept_progress` and starts at the first unmastered topic, so topics flagged `needs_review` are revisited.
+- **Progress lives in two places on purpose, with one owner each.** `subconcept_progress` is the long-lived answer to "what does this student know?". It spans sessions and is what the progress rail shows. `sessions.state_json` is the engine's full working state (`SessionState` in `src/core/types.ts`): current subconcept, pending question, which strategy we're on, how many re-teaches, the board. Resume is exact because we restore that snapshot, not reconstruct it. The state also holds the tutor's memory: its last four decisions with their reasons, so it can truthfully answer "why did we move on?"; the streak; and the last misconception, so a later correct answer on that kind of question is recognised as a fix.
+- **A session is one sitting.** It closes after 30 minutes of inactivity (`end_reason = inactive`), on "start over" (`restarted`), or when the curriculum is done (`finished`). Session N+1 is seeded from `subconcept_progress`. It opens with a **retention check**: one question from the most recently mastered topic, after which the student continues at the first unmastered topic. A failed check un-masters the topic and re-teaches it.
+- **Misconceptions are counted per student and per topic, not just logged per turn.** That powers the end-of-topic recap ("remember: x − 3 = 0 gives +3"), the "you fixed it" moment, and the insights page.
 - **`turns` is an append-only event log**, one row per tutor turn. It is the conversation history (the prompts read the last few rows), the audit trail for every decision (`action` + `reason`), and the observability source. I denormalised the fields I expect to query (`intent`, `correct`, `action`, `degraded`, latencies, versions) into columns, and kept the full payloads as JSON.
 - **Everything is keyed by stable string IDs** (`factorisation`, `fa_nonmonic`, `sign_check`), never by position. That is what lets the curriculum change under a student (§2).
 - **Status is a small state machine:** `not_started → in_progress → mastered | needs_review`. Mastery is 2 correct in a row. `needs_review` means the student was still wrong after 2 re-teaches with different strategies, so we flag the topic and move on rather than loop.
@@ -46,7 +53,7 @@ What I'd add with real users: a `curriculum_versions` table instead of versions 
 
 ## 2. Iterability
 
-Three kinds of change, and what each does to a student halfway through session 3:
+Three kinds of change, and what each does to a student halfway through session 3 (sessions really are numbered now; see §1):
 
 | Change | Where it lives | Effect on an in-flight student |
 |---|---|---|
@@ -85,6 +92,7 @@ What's missing for real scale (listed in §6): pinning a session to the versions
 | Assessor `intent = unclear` rate | STT or the assessor is failing; students are being asked to repeat themselves | > 15%, or 2× the 7-day baseline |
 | Leak-guard rejections (`rejected:` attempts) | The responder is drifting toward giving answers away | 2× baseline |
 | Sessions stuck: ≥ 3 `reteach` in a row with no `next_check` | The loop, not the student, is failing | spike vs baseline |
+| LLM spend against the key's limit | When the limit is hit, every turn silently becomes a canned "degraded" lesson. This happened during development: the eval suite with a `gpt-5.4` judge costs about $1 per full run. | 80% of budget |
 
 **Finding out the tutor got worse before a student tells you**
 
@@ -97,7 +105,15 @@ What's missing for real scale (listed in §6): pinning a session to the versions
 
    A worse explainer shows up as lower re-teach success within hours.
 3. **Continuous:** a nightly job that samples ~50 real turns and runs the same LLM judge rubric on them. That becomes a quality time series you can alert on.
-4. **Canary sims:** `npm run sim` on a schedule against production. The `gradedRight` column checks grading against the simulated student's own stated answer, so a regression in the assessor shows up as a drop there.
+4. **Canary sims:** `npm run sim -- --api <prod> --sessions 3` on a schedule. It drives the real deployment as flagged simulated students, across sessions, so it also exercises retention checks. The `gradedRight` column checks grading against the simulated student's own stated answer, so a regression in the assessor shows up as a drop there.
+
+**Where to look:** `/insights` turns the turn log into the views above, with real and simulated traffic separable:
+- re-teach success, overall and per strategy
+- mastery funnel and most common misconceptions (with how often they were fixed)
+- hardest questions, with an "unclear" rate that flags confusing wording
+- retention, and where abandoned sessions stopped
+- intent mix, and accuracy, re-teach and degraded rates per prompt and model version
+- latency by stage
 
 ## 4. Latency
 
@@ -147,7 +163,7 @@ FROM graded WHERE action = 'reteach' AND next_correct IS NOT NULL GROUP BY promp
 - **Experience:** p50/p90 time-to-first-audio; degraded-turn rate; mic-permission-denied rate; share of typed versus spoken input (a high typed share means voice isn't working for people).
 - **Cost:** tokens and dollars per mastered subconcept, which is the unit that matters.
 
-The North Star for the business is weekly students reaching mastery on a new subconcept. Re-teach success is the leading indicator I'd watch daily.
+The North Star for the business is weekly students reaching mastery on a new subconcept. Re-teach success is the leading indicator I'd watch daily. It is the headline number on `/insights`, next to per-strategy success, which tells you which explanation to improve. Retention (warm-up pass rate on later sessions) is the check that "mastered" means something.
 
 ## 6. What's ugly
 
@@ -163,3 +179,6 @@ What I'd fix with another two days, roughly in priority order:
 8. **No auth.** The student ID is a random ID in `localStorage`, and anyone with a session ID can read its decision log. That's fine for a demo, not for children's data. Add accounts, and scope `/api/session/:id/log` to its owner.
 9. **The board highlight is a substring match on LaTeX.** If the LLM highlights a term that spans braces, it falls back to highlighting the whole line. A structured board (steps and terms as IDs, rendered from a tree) would make "highlight the −5x in step 2" exact.
 10. **Circuit-breaker state is per isolate.** Each Worker isolate learns about an outage separately. Moving it to a Durable Object or KV would make fallback kick in faster during a provider incident.
+11. **`/insights` is public and computed live.** Fine at this scale. With real traffic it needs auth and pre-aggregated tables (a nightly rollup), not window functions over every turn.
+12. **Memory is shallow.** The tutor remembers 4 decisions. The retention check asks one question from one topic. The streak resets each session. Spaced review across all mastered topics (weighted by time since mastery and past mistakes) is the obvious next step.
+13. **The evals are expensive to run often.** About $1 per full run with a `gpt-5.4` judge. I'd use a cheaper judge for routine runs, keep the strong judge for release gates, and run only the deterministic scenarios on every commit.
