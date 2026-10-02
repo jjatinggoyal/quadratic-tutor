@@ -404,8 +404,9 @@ function leakProblem(v: { board: BoardOp[] }, pending: CheckItem | null, previou
     }
     return null;
   }
-  // Word problems: the distinctive numbers of the story (e.g. 306) must not appear on the board.
-  const numbers = [...new Set(pending.text.match(/\d{2,}/g) ?? [])];
+  // Word problems: the story's distinctive numbers (e.g. 306, 528) must not appear on the board.
+  // Small numbers like 10 or 13 are too common in other examples to mean anything.
+  const numbers = [...new Set(pending.text.match(/\d+/g) ?? [])].filter((n) => Number(n) > 20);
   const hit = numbers.find((n) => writes.some((w) => new RegExp(`(^|\\D)${n}(\\D|$)`).test(w)));
   return hit ? `the board works through the upcoming word problem (it uses ${hit}); use a different example` : null;
 }
