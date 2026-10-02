@@ -75,7 +75,7 @@ npm run deploy                                     # build → remote migrations
 
 ## Evals: `npm run eval`
 
-31 single-turn scenarios (`evals/scenarios.ts`), each run 3×. A scenario passes at 2 of 3 runs. The command exits 1 on any **regression** versus `evals/baseline.json`.
+34 single-turn scenarios (`evals/scenarios.ts`), each run 3×. A scenario passes at 2 of 3 runs. The command exits 1 on any **regression** versus `evals/baseline.json`.
 
 - **First contact:** the welcome comes first and instantly; "ready" starts the lesson; "wait" holds it; a question in the first reply gets answered.
 - **Grading:** STT homophones, Hinglish, a single root given for a two-root equation, working with no final answer, a self-contradicting reply, and the "has x² so it's quadratic" trap.
@@ -118,13 +118,18 @@ Output is a Markdown transcript plus JSON per session in `sim/out/`, and a summa
 ```
 src/core/        pure TypeScript: runs in the Worker, the evals and the simulator
   curriculum/    the six subconcepts (data)
-  engine.ts      assess → decide → respond, board sanitising, leak guard, canned fallbacks
+  engine.ts      one turn: assess → decide → respond; deterministic turns (welcome, resume, repeat)
   policy.ts      the teaching loop (pure)
+  respond.ts     board composition, responder context, "why that's right"
   grader.ts      answer checking + heuristic extraction
-  prompts.ts     assessor/responder prompts, PROMPT_VERSION
-  llm.ts         OpenRouter client: timeouts, retries, fallback model, circuit breaker, validation
-src/worker/      Cloudflare Worker: HTTP API, D1 persistence, STT endpoint, insights queries
-src/web/         React SPA: whiteboard (KaTeX), voice I/O, progress rail, decision log, /insights
+  intents.ts     replies understood locally ("repeat that", "not yet")
+  leak.ts        answer-leak guard;  mathcheck.ts  equation parser (no eval: Workers forbid it)
+  canned.ts      fallback scripts;   prompts.ts    prompts + PROMPT_VERSION
+  llm.ts         OpenRouter/Groq clients: timeouts, retries with feedback, fallback chain, ProviderHealth
+src/worker/      Cloudflare Worker
+  index.ts       router;  routes/  session, turn, speech;  db.ts  guarded D1 writes
+  views.ts       response shapes;  env.ts  config;  http.ts  validation;  insights.ts  /insights queries
+src/web/         React SPA: App (session + turn flow), voice.ts (VoiceLoop), components/, Insights
 migrations/      D1 schema
 evals/           regression suite, curriculum lint, fault-injecting transports
 sim/             simulated students

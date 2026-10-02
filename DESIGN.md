@@ -13,7 +13,7 @@ The LLM never decides whether an answer is right or whether to move on. The asse
 
 ## 1. Data model
 
-D1 (SQLite), four tables. Full DDL: `migrations/0001_init.sql` and `0002_sessions_memory_insights.sql`.
+D1 (SQLite), four tables. Full DDL: `migrations/0001_init.sql`, `0002_sessions_memory_insights.sql` and `0003_integrity.sql`.
 
 ```
 students            (id PK, display_name, is_simulated, created_at)
@@ -35,8 +35,9 @@ turns               (id PK, session_id, seq, client_turn_id, created_at,
                      prompt_version, curriculum_version, assessor_model, responder_model,
                      assessor_ms, responder_ms, total_ms, tokens_in, tokens_out,
                      degraded, llm_attempts_json, client_timings_json,
-                     is_review, fixed_misconception)
+                     is_review, fixed_misconception, view_json)          -- view_json: the exact response, for replays
                      UNIQUE (session_id, seq), UNIQUE (session_id, client_turn_id)
+UNIQUE INDEX one_active_session_per_student ON sessions (student_id) WHERE status = 'active'
 ```
 
 **Why this shape**
@@ -47,7 +48,11 @@ turns               (id PK, session_id, seq, client_turn_id, created_at,
 - **`turns` is an append-only event log**, one row per tutor turn. It is the conversation history (the prompts read the last few rows), the audit trail for every decision (`action` + `reason`), and the observability source. I denormalised the fields I expect to query (`intent`, `correct`, `action`, `degraded`, latencies, versions) into columns, and kept the full payloads as JSON.
 - **Everything is keyed by stable string IDs** (`factorisation`, `fa_nonmonic`, `sign_check`), never by position. That is what lets the curriculum change under a student (§2).
 - **Status is a small state machine:** `not_started → in_progress → mastered | needs_review`. Mastery is 2 correct in a row. `needs_review` means the student was still wrong after 2 re-teaches with different strategies, so we flag the topic and move on rather than loop.
-- **Concurrency and idempotency.** Every turn carries a browser-generated `client_turn_id`. A retry after a network error returns the stored turn instead of applying it twice. All writes for a turn go in one D1 batch (a transaction). `UNIQUE(session_id, seq)` makes a racing second tab fail with a 409 instead of silently forking the session.
+- **Concurrency and idempotency.** Every turn carries a browser-generated `client_turn_id`, and the exact response is stored with the turn. A retry returns that stored response, even when it raced its own first attempt after a client timeout. All writes for a turn go in one D1 batch, and every statement is guarded:
+  - The turn insert requires the session to be active, at the turn count that was read.
+  - The progress upserts and the session update require that turn row to exist.
+
+  A lost race, or an old tab posting to a closed session, applies nothing; it gets `409 conflict` or `409 session_closed`. The client handles the second by starting a fresh session. A partial unique index allows one active session per student, and a session is created atomically with its opening turn.
 
 What I'd add with real users: a `curriculum_versions` table instead of versions living only in code, and an `events` table for client-side events (mic denied, TTS interrupted, tab hidden).
 
@@ -177,7 +182,7 @@ What I'd fix with another two days, roughly in priority order:
 5. **The simulator's student doesn't always follow its directive** (the `obeyed` column: 71–100%). Grading accuracy is measured against the student's own stated answer, so the metric is still sound, but personas are noisier than they should be.
 6. **The eval suite is single-turn.** Multi-turn behaviours (does the second re-teach differ from the first? does the tutor stop repeating itself?) are only visible in sims, not in pass/fail checks. I'd promote a few sim transcripts into scripted multi-turn scenarios.
 7. **Voice is browser-grade.** `speechSynthesis` voices vary a lot by OS, and there is no voice-activity detection or barge-in during browser TTS beyond tapping the mic. Server STT fallback works but has ~2 s extra latency. OpenRouter has no TTS models, so better TTS means adding a provider.
-8. **No auth.** The student ID is a random ID in `localStorage`, and anyone with a session ID can read its decision log. That's fine for a demo, not for children's data. Add accounts, and scope `/api/session/:id/log` to its owner.
+8. **No auth or rate limiting.** The student ID is a random ID in `localStorage`. Anyone with a session ID can read its decision log, and anyone can call the session, turn and STT endpoints, which spend LLM credit. Requiring `application/json` stops cross-site form posts, but that's all. Add accounts or Turnstile, rate limiting, and owner-scoped logs before real students.
 9. **The board highlight is a substring match on LaTeX.** If the LLM highlights a term that spans braces, it falls back to highlighting the whole line. A structured board (steps and terms as IDs, rendered from a tree) would make "highlight the −5x in step 2" exact.
 10. **Circuit-breaker state is per isolate.** Each Worker isolate learns about an outage separately. Moving it to a Durable Object or KV would make fallback kick in faster during a provider incident.
 11. **`/insights` is public and computed live.** Fine at this scale. With real traffic it needs auth and pre-aggregated tables (a nightly rollup), not window functions over every turn.

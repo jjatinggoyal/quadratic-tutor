@@ -37,6 +37,9 @@
     "welcome-first": true,
     "ready-starts-lesson": true,
     "not-ready-waits": true,
-    "ready-with-question": true
+    "ready-with-question": true,
+    "no-problem-is-ready": true,
+    "reload-after-welcome": true,
+    "again-is-not-repeat": true
   }
 }
