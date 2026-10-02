@@ -5,7 +5,7 @@ import type { Curriculum } from "../core/types";
 // needs extra instrumentation: every number comes from columns the turn
 // pipeline already writes (see DESIGN.md §3 and §5).
 
-export async function computeInsights(db: D1Database, c: Curriculum, sim: SimFilter): Promise<Insights> {
+export async function computeInsights(db: D1Database, c: Curriculum, sim: SimFilter, sessionTimeoutMs: number): Promise<Insights> {
   // Joins every query to students so simulated traffic can be included, excluded, or isolated.
   const who = sim === "include" ? "1=1" : sim === "only" ? "st.is_simulated = 1" : "st.is_simulated = 0";
   const turnsJoin = `turns t JOIN sessions se ON se.id = t.session_id JOIN students st ON st.id = se.student_id`;
@@ -63,12 +63,14 @@ export async function computeInsights(db: D1Database, c: Curriculum, sim: SimFil
              SUM(t.action = 'reteach') AS reteaches, SUM(t.correct IS NOT NULL) AS graded, SUM(t.correct = 1) AS correct
       FROM ${turnsJoin} WHERE ${who} GROUP BY 1, 2 ORDER BY MIN(t.created_at) DESC LIMIT 8`),
 
-    // Where students who stopped coming back left off.
+    // Where students stopped. A session only gets end_reason 'inactive' when the student starts another one,
+    // so students who never came back are the still-"active" sessions that have gone stale.
     q<{ subconcept_id: string | null; action: string; n: number }>(`
       SELECT t.subconcept_id, t.action, COUNT(*) AS n
       FROM sessions se JOIN students st ON st.id = se.student_id
       JOIN turns t ON t.session_id = se.id AND t.seq = se.turn_count
-      WHERE ${who} AND se.end_reason = 'inactive' GROUP BY 1, 2 ORDER BY n DESC LIMIT 10`),
+      WHERE ${who} AND (se.end_reason = 'inactive' OR (se.status = 'active' AND se.updated_at < ${Date.now() - sessionTimeoutMs}))
+      GROUP BY 1, 2 ORDER BY n DESC LIMIT 10`),
 
     q<{ subconcept_id: string; passed: number; failed: number }>(`
       SELECT p.subconcept_id, SUM(p.reviews_passed) AS passed, SUM(p.reviews_failed) AS failed
