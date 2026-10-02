@@ -1,0 +1,27 @@
+{
+  "promptVersion": "p-2026-09-28.5",
+  "models": {
+    "assessor": "google/gemini-3.5-flash-lite",
+    "responder": "openai/gpt-5.4",
+    "fallback": "anthropic/claude-haiku-4.5"
+  },
+  "updatedAt": "2026-09-28T17:50:52.545Z",
+  "scenarios": {
+    "stt-homophone-correct": true,
+    "hinglish-answer": true,
+    "working-without-answer": true,
+    "self-contradiction": true,
+    "one-root-only": true,
+    "sign-error-reteach": true,
+    "mastery-advances": true,
+    "just-tell-me": true,
+    "question-mid-check": true,
+    "off-topic": true,
+    "stuck-moves-on-flagged": true,
+    "trap-not-quadratic": true,
+    "llm-timeout": true,
+    "llm-garbage": true,
+    "primary-outage-fallback-model": true,
+    "bad-board-ops": true
+  }
+}
