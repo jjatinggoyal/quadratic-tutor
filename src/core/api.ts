@@ -85,3 +85,26 @@ export function progressRows(c: Curriculum, state: SessionState): ProgressRow[] 
     };
   });
 }
+
+// ---------- Insights (/insights) ----------
+
+export type SimFilter = "exclude" | "include" | "only";
+
+export interface Insights {
+  sim: SimFilter;
+  generatedAt: number;
+  overview: { students: number; sessions: number; turns: number; finishedSessions: number; returningStudents: number; turnsPerSession: number };
+  /** P(next answer correct | re-teach), across all strategies. The headline metric (DESIGN.md §5). */
+  reteachSuccessOverall: number | null;
+  funnel: { id: string; title: string; mastered: number; inProgress: number; needsReview: number }[];
+  reteach: { subconcept: string; strategy: string; n: number; success: number | null }[];
+  misconceptions: { subconcept: string; label: string; seen: number; fixed: number }[];
+  hardestChecks: { subconcept: string; question: string; answers: number; accuracy: number | null; unclearRate: number }[];
+  intents: { intent: string; n: number; share: number }[];
+  actions: { action: string; n: number }[];
+  latency: { p50: number | null; p90: number | null; assessorP50: number | null; responderP50: number | null; degradedRate: number; sample: number };
+  versions: { promptVersion: string; responderModel: string | null; turns: number; degradedRate: number; reteachRate: number; accuracy: number | null }[];
+  dropoff: { subconcept: string; action: string; n: number }[];
+  retention: { subconcept: string; passed: number; failed: number }[];
+  inputSources: { source: string; n: number }[];
+}

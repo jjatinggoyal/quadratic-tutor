@@ -5,6 +5,7 @@ import { startReview } from "../core/policy";
 import { OpenRouterTransport } from "../core/llm";
 import type { TurnResult } from "../core/types";
 import { ConflictError, TutorDb, type SessionRow } from "./db";
+import { computeInsights } from "./insights";
 import { transcribe } from "./stt";
 
 export interface Env {
@@ -48,6 +49,10 @@ async function route(req: Request, env: Env, url: URL): Promise<Response> {
   if (p === "/api/session" && req.method === "POST") return startSession(req, env, db);
   if (p === "/api/turn" && req.method === "POST") return turn(req, env, db);
   if (p === "/api/stt" && req.method === "POST") return stt(req, env);
+  if (p === "/api/insights" && req.method === "GET") {
+    const sim = url.searchParams.get("sim");
+    return json(await computeInsights(env.DB, curriculum, sim === "include" || sim === "only" ? sim : "exclude"));
+  }
   const log = p.match(/^\/api\/session\/([\w-]+)\/log$/);
   if (log && req.method === "GET") {
     const rows = await db.decisionLog(log[1]);
