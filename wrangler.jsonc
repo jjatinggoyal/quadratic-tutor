@@ -1,0 +1,30 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "quadratic-tutor",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-09-20",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "quadratic-tutor",
+      "database_id": "a09bed91-2ded-428f-8599-702cba026d5c",
+      "migrations_dir": "./migrations"
+    }
+  ],
+  // Model choices are config, not code, so they can be changed (and rolled back)
+  // without touching the engine. OPENROUTER_KEY is a secret: `wrangler secret put OPENROUTER_KEY`.
+  "vars": {
+    "MODEL_ASSESSOR": "google/gemini-3.5-flash-lite",
+    "MODEL_RESPONDER": "openai/gpt-5.4",
+    "MODEL_FALLBACK": "anthropic/claude-haiku-4.5",
+    "MODEL_STT": "google/gemini-3.1-flash-lite",
+    "MODEL_STT_FALLBACK": "google/gemini-3.5-flash-lite"
+  },
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}
