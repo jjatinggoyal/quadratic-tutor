@@ -116,12 +116,14 @@ export interface SessionState {
   recentDecisions: DecisionMemo[];
   /** Correct answers in a row, across topics. */
   streak: number;
-  /** Misconception behind the most recent wrong answer in this topic; cleared when they get one right. */
+  /** Misconception behind the most recent wrong answer in this topic; cleared on a correct answer or a new topic. */
   lastMisconception: string | null;
   /** Set while asking a retention question from an already mastered topic; returnTo is where to continue. */
   review: { returnTo: string | null } | null;
   /** Brand-new student: greet and wait for them to be ready before teaching. */
   awaitingStart: boolean;
+  /** After a failed retention check: where to continue once the reviewed topic is re-mastered. */
+  resumeAt: string | null;
 }
 
 // ---------- Turn pipeline ----------
@@ -154,6 +156,7 @@ export type TutorAction =
   | "repeat" // replay the last thing the tutor said (optionally slower); no LLM
   | "review" // start of a later session: retention question on a mastered topic
   | "greet" // very first session: introduce Tara and how the lesson works; no LLM
+  | "resume" // re-opened an active session (e.g. reload): re-ask the pending question; no LLM
   | "complete"; // curriculum finished
 
 export interface Decision {

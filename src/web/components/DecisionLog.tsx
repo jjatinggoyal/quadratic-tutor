@@ -20,6 +20,10 @@ const ACTION_LABEL: Record<string, string> = {
   redirect: "Redirect",
   clarify: "Clarify",
   complete: "Complete",
+  greet: "Welcome",
+  resume: "Resume",
+  repeat: "Repeat",
+  review: "Warm-up",
 };
 
 /** "Why did the tutor do that?": the policy's reason for every turn. */

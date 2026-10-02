@@ -61,6 +61,7 @@ export function stateFromProgress(c: Curriculum, saved: Record<string, Subconcep
     review: null,
     // Only a student who has never started anything gets the welcome.
     awaitingStart: Object.values(progress).every((p) => p.status === "not_started" && p.checksAttempted === 0),
+    resumeAt: null,
   };
   const start = c.subconcepts.find((s) => progress[s.id].status !== "mastered");
   return start ? enterSubconcept(base, start) : base;
@@ -102,6 +103,7 @@ export function rebaseState(saved: SessionState, c: Curriculum): SessionState {
     lastMisconception: saved.lastMisconception ?? null,
     review: saved.review ?? null,
     awaitingStart: saved.awaitingStart ?? false,
+    resumeAt: saved.resumeAt ?? null,
     progress: Object.fromEntries(Object.entries(saved.progress).map(([id, p]) => [id, normaliseProgress(p)])),
   };
   if (state.curriculumVersion === c.version && state.curriculumId === c.id) return state;
@@ -126,6 +128,7 @@ function enterSubconcept(state: SessionState, sub: Subconcept): SessionState {
     usedCheckIds: [first.id],
     correctInARow: 0,
     reteachesHere: 0,
+    lastMisconception: null,
     progress: {
       ...state.progress,
       [sub.id]: {
@@ -269,7 +272,8 @@ export function decide(c: Curriculum, state: SessionState, a: Assessment): Polic
     attempted.status = "in_progress";
     attempted.reviewsFailed = prog.reviewsFailed + 1;
     reviewText = ` Retention check on "${sub.title}" failed, so it is no longer counted as mastered.`;
-    state = { ...state, review: null };
+    // Remember where the student was headed, so re-mastering this topic returns them there.
+    state = { ...state, review: null, resumeAt: state.review.returnTo };
   }
 
   if (state.reteachesHere >= sub.mastery.maxReteaches) {
@@ -330,7 +334,10 @@ function pickReteachStrategy(sub: Subconcept, current: number, misconceptionId: 
 }
 
 function moveOn(c: Curriculum, state: SessionState, fromIndex: number, d: Omit<Decision, "toSubconceptId" | "checkId">): PolicyResult {
-  const next = nextOpenSubconcept(c, state, fromIndex);
+  // After re-teaching a topic that failed its retention check, go back to where the student was headed.
+  const resume = getSubconcept(c, state.resumeAt);
+  state = { ...state, resumeAt: null };
+  const next = resume && state.progress[resume.id]?.status !== "mastered" ? resume : nextOpenSubconcept(c, state, fromIndex);
   if (!next) {
     return {
       decision: { ...d, action: "complete", reason: `${d.reason} That was the last topic.`, toSubconceptId: null, checkId: null },

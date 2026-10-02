@@ -1,30 +1,20 @@
-import { applyBoardOps, isWhy, QUESTION_IDS } from "./board";
-import { describeAnswer, grade, heuristicExtract } from "./grader";
-import { callJson, modelChain, type LlmTransport, type ModelConfig } from "./llm";
-import { nearDuplicate } from "./mathcheck";
+import { applyBoardOps } from "./board";
+import { grade, heuristicExtract } from "./grader";
+import { isNotReady, quickIntent, welcomeSpeech } from "./intents";
+import { callJson, modelChain, type LlmTransport, type ModelConfig, type ProviderHealth } from "./llm";
 import { decide, getCheck, getSubconcept, initialState, rebaseState, stateFromProgress } from "./policy";
-import { assessorMessages, PROMPT_VERSION, responderMessages, type HistoryLine, type ResponderContext } from "./prompts";
-import { AssessorOutput, ResponderOutput } from "./schemas";
-import type {
-  Assessment,
-  BoardItem,
-  BoardOp,
-  CheckItem,
-  Curriculum,
-  Decision,
-  LlmCallTelemetry,
-  SessionState,
-  Subconcept,
-  TurnResult,
-  TutorAction,
-} from "./types";
+import { assessorMessages, PROMPT_VERSION, type HistoryLine } from "./prompts";
+import { remember, respond } from "./respond";
+import { AssessorOutput } from "./schemas";
+import type { Assessment, BoardItem, CheckItem, Curriculum, Decision, LlmCallTelemetry, SessionState, Subconcept, TurnResult } from "./types";
 
 // One tutor turn = assess → decide → respond.
 //
 //   assess   LLM extracts intent + answer; the grader decides correctness.
-//            If the LLM fails, a heuristic extractor takes over.
+//            If the LLM fails, a heuristic extractor takes over. A few short
+//            replies ("repeat that", "not yet") are understood locally.
 //   decide   Pure policy (policy.ts). No LLM.
-//   respond  LLM writes speech + board ops for the decided action.
+//   respond  LLM writes speech + board ops for the decided action (respond.ts).
 //            If the LLM fails, canned curriculum scripts take over.
 //
 // The engine never throws on LLM failure; it marks the turn `degraded`.
@@ -34,72 +24,40 @@ export interface EngineDeps {
   transport: LlmTransport;
   models: ModelConfig;
   timeouts?: { assessorMs: number; responderMs: number; assessorBudgetMs: number; responderBudgetMs: number };
+  /** Breaker / provider-down state. Defaults to one shared per isolate; evals pass a fresh one per run. */
+  health?: ProviderHealth;
 }
 
-const DEFAULT_TIMEOUTS = { assessorMs: 6000, responderMs: 9000, assessorBudgetMs: 9000, responderBudgetMs: 14000 };
+const ASSESSOR_TIMEOUTS = { assessorMs: 6000, assessorBudgetMs: 9000 };
 
 export { initialState, rebaseState, stateFromProgress };
 
 // ---------------------------------------------------------------------------
 
+/** The tutor's first turn of a session (no student input yet). */
 export async function openingTurn(deps: EngineDeps, state: SessionState, history: HistoryLine[]): Promise<TurnResult> {
   const started = Date.now();
   const c = deps.curriculum;
   const sub = getSubconcept(c, state.subconceptId);
   const check = getCheck(sub, state.pendingCheckId);
 
-  // Returning student: resume deterministically, no LLM needed.
-  if (history.length > 0 || !sub || !check) {
-    const decision: Decision = {
-      action: sub ? "answer_question" : "complete",
-      reason: sub ? `Resuming a saved session at "${sub.title}".` : "Session already complete.",
-      fromSubconceptId: state.subconceptId,
-      toSubconceptId: state.subconceptId,
-      strategyId: sub?.strategies[state.strategyIndex]?.id ?? null,
-      checkId: state.pendingCheckId,
-    };
-    const speech = sub && check
-      ? `Welcome back! We were working on ${sub.title.toLowerCase()}. Let's pick up where we left off. ${check.spoken}`
-      : "Welcome back! You've already finished all six topics. Great work.";
-    return {
-      speech,
-      boardOps: [],
-      board: state.board,
-      decision,
-      assessment: null,
-      state,
-      telemetry: { promptVersion: PROMPT_VERSION, calls: [], totalMs: Date.now() - started, degraded: false },
-      speechRate: 1,
-    };
-  }
-
-  if (state.awaitingStart) return greeting(state, started, "welcome");
+  // Checked before "resume": reloading after the welcome must not skip the lesson and jump to the question.
+  if (state.awaitingStart) return greeting(c, state, started, "welcome");
+  if (history.length > 0 || !sub || !check) return resumed(c, state, sub, check, started);
 
   if (state.review) {
     const back = getSubconcept(c, state.review.returnTo);
-    const decision: Decision = {
-      action: "review",
-      reason: `New session for a returning student: starting with a retention check on "${sub.title}", mastered earlier, before continuing${back ? ` with "${back.title}"` : ""}.`,
-      fromSubconceptId: null,
-      toSubconceptId: sub.id,
-      strategyId: null,
-      checkId: check.id,
-    };
-    return respond(deps, { prevState: { ...state, board: [], pendingCheckId: null }, nextState: state, decision, assessment: null, studentText: null, history, calls: [], started });
+    return respond(deps, {
+      ...fresh(state, history, started),
+      decision: decisionFor("review", `New session for a returning student: starting with a retention check on "${sub.title}", mastered earlier, before continuing${back ? ` with "${back.title}"` : ""}.`, null, sub, check),
+    });
   }
 
-  const started_any = Object.values(state.progress).some((p) => p.checksAttempted > 0);
-  const decision: Decision = {
-    action: "teach",
-    reason: `New session: starting with ${started_any ? "the first topic not yet mastered" : "the first topic"}, "${sub.title}", using strategy "${sub.strategies[state.strategyIndex].name}".`,
-    fromSubconceptId: null,
-    toSubconceptId: sub.id,
-    strategyId: sub.strategies[state.strategyIndex].id,
-    checkId: check.id,
-  };
-  return respond(deps, { prevState: { ...state, board: [], pendingCheckId: null }, nextState: state, decision, assessment: null, studentText: null, history, calls: [], started });
+  const startedBefore = Object.values(state.progress).some((p) => p.checksAttempted > 0);
+  return respond(deps, { ...fresh(state, history, started), decision: teachDecision(sub, check, state, startedBefore ? "New session: starting with the first topic not yet mastered" : "New session: starting with the first topic") });
 }
 
+/** One student turn. */
 export async function runTurn(deps: EngineDeps, state: SessionState, history: HistoryLine[], studentText: string): Promise<TurnResult> {
   const started = Date.now();
   const c = deps.curriculum;
@@ -114,20 +72,16 @@ export async function runTurn(deps: EngineDeps, state: SessionState, history: Hi
 
   // After the welcome: start the first lesson on any reply, unless they ask to wait.
   if (state.awaitingStart) {
-    if (NOT_READY_RE.test(studentText) && studentText.trim().split(/\s+/).length <= 8) return greeting(state, started, "wait");
-    const decision: Decision = {
-      action: "teach",
-      reason: `Student is ready; starting with the first topic, "${sub.title}", using strategy "${sub.strategies[state.strategyIndex].name}".`,
-      fromSubconceptId: null,
-      toSubconceptId: sub.id,
-      strategyId: sub.strategies[state.strategyIndex].id,
-      checkId: check.id,
-    };
-    // pendingCheckId: null so the question is written to the board and the leak guard applies.
-    return respond(deps, { prevState: { ...state, pendingCheckId: null }, nextState: { ...state, awaitingStart: false }, decision, assessment: null, studentText, history, calls, started });
+    if (isNotReady(studentText)) return greeting(c, state, started, "wait");
+    return respond(deps, {
+      ...fresh(state, history, started),
+      prevState: { ...state, pendingCheckId: null },
+      nextState: { ...state, awaitingStart: false },
+      studentText,
+      decision: teachDecision(sub, check, state, "Student is ready; starting with the first topic"),
+    });
   }
 
-  // "Repeat that" / "slower please" needs no LLM: answer it instantly.
   const quick = quickIntent(studentText);
   let assessment: Assessment;
   if (quick) {
@@ -138,16 +92,18 @@ export async function runTurn(deps: EngineDeps, state: SessionState, history: Hi
     calls.push(assessed.telemetry);
   }
   const { decision, state: nextState } = decide(c, state, assessment);
+  if (decision.action === "repeat") return replay(state, nextState, decision, assessment, history, check, calls, started);
   return respond(deps, { prevState: state, nextState, decision, assessment, studentText, history, calls, started });
 }
 
 // ---------------------------------------------------------------------------
 
 async function assess(deps: EngineDeps, sub: Subconcept, check: CheckItem, studentText: string, history: HistoryLine[]) {
-  const t = deps.timeouts ?? DEFAULT_TIMEOUTS;
+  const t = deps.timeouts ?? ASSESSOR_TIMEOUTS;
   const { value, telemetry } = await callJson({
     role: "assessor",
     transport: deps.transport,
+    health: deps.health,
     models: modelChain(deps.models.assessor, deps.models),
     messages: assessorMessages(sub, check, studentText, history),
     schema: AssessorOutput,
@@ -172,6 +128,12 @@ async function assess(deps: EngineDeps, sub: Subconcept, check: CheckItem, stude
   } else {
     assessment = heuristicExtract(check.answer, studentText);
   }
+
+  // "An answer" with nothing in it can't be graded; ask again rather than count it as wrong
+  // (which would burn a re-teach and could flag the topic).
+  if (assessment.intent === "answer" && isEmpty(assessment.extracted)) {
+    assessment = { ...assessment, intent: "unclear", note: `${assessment.note} (no answer could be extracted)`.trim() };
+  }
   if (assessment.intent === "answer") {
     assessment.correct = grade(check.answer, assessment.extracted);
     if (assessment.correct) assessment.misconceptionId = null;
@@ -179,63 +141,15 @@ async function assess(deps: EngineDeps, sub: Subconcept, check: CheckItem, stude
   return { assessment, telemetry };
 }
 
-const NOT_READY_RE = /\b(no|not (yet|ready)|wait|hold on|one (sec|second|minute)|later|ruko|abhi nahi)\b/i;
-
-const WELCOME =
-  "Hi, I'm Tara, your maths tutor! Today we're learning quadratic equations, in six short steps. You can see them on the left. " +
-  "For each one, I'll explain on the whiteboard, then ask you a quick question to check it made sense. " +
-  "Answer by speaking or typing. You can stop me any time to ask a question, or say repeat. Ready to begin?";
-
-/** The welcome (and "take your time") turns: fixed text, so they play instantly with no LLM call. */
-function greeting(state: SessionState, started: number, kind: "welcome" | "wait"): TurnResult {
-  const board: BoardItem[] =
-    kind === "welcome"
-      ? applyBoardOps([], [
-          { op: "clear" },
-          { op: "write", id: "title", kind: "text", content: "Welcome!" },
-          { op: "write", id: "w_1", kind: "text", content: "Quadratic equations in 6 short steps" },
-          { op: "write", id: "w_2", kind: "math", content: "ax^2 + bx + c = 0" },
-          { op: "write", id: "w_3", kind: "text", content: "I explain → you try a question → we move on when it clicks" },
-          { op: "write", id: "w_4", kind: "text", content: "Speak or type · ask anything · say “repeat”" },
-          { op: "highlight", id: "w_2" },
-        ]).board
-      : state.board;
-  return {
-    speech: kind === "welcome" ? WELCOME : "No problem, take your time. Just say ready when you want to start.",
-    boardOps: [],
-    board,
-    decision: {
-      action: "greet",
-      reason: kind === "welcome" ? "First ever session: introducing Tara and how the lesson works, then waiting until the student is ready." : "Student asked to wait; holding the lesson until they're ready.",
-      fromSubconceptId: null,
-      toSubconceptId: state.subconceptId,
-      strategyId: null,
-      checkId: null,
-    },
-    assessment: null,
-    state: { ...state, board },
-    telemetry: { promptVersion: PROMPT_VERSION, calls: [], totalMs: Date.now() - started, degraded: false },
-    speechRate: 1,
-  };
-}
-
-const REPEAT_RE = /\b(repeat|again|once more|one more time|didn'?t (hear|catch)|come again|pardon|dobara|phir se)\b/i;
-const SLOWER_RE = /\b(slow(er|ly)?|too fast|dheere)\b/i;
-
-/** Short, unambiguous requests to replay the last turn. Anything longer goes to the assessor. */
-export function quickIntent(text: string): Assessment | null {
-  const words = text.trim().split(/\s+/).length;
-  if (words > 8 || /\d|explain|why|how|what|step|part/i.test(text)) return null;
-  const slower = SLOWER_RE.test(text);
-  if (!slower && !REPEAT_RE.test(text)) return null;
-  return { intent: "repeat", slower, extracted: null, misconceptionId: null, note: "matched a repeat request locally", correct: null, source: "heuristic" };
+function isEmpty(e: Assessment["extracted"]): boolean {
+  return !e || ((e.numbers?.length ?? 0) === 0 && e.yesNo === undefined && !e.choice);
 }
 
 function toExtracted(check: CheckItem, v: AssessorOutput): Assessment["extracted"] {
   switch (check.answer.type) {
     case "number_set":
     case "number":
-      return { numbers: v.numbers };
+      return v.numbers.length ? { numbers: v.numbers } : null;
     case "yes_no":
       return v.yes_no === null ? null : { yesNo: v.yes_no };
     case "choice":
@@ -244,260 +158,85 @@ function toExtracted(check: CheckItem, v: AssessorOutput): Assessment["extracted
 }
 
 // ---------------------------------------------------------------------------
+// Deterministic turns: no LLM, so they are instant and can't fail.
 
-interface RespondArgs {
-  prevState: SessionState;
-  nextState: SessionState;
-  decision: Decision;
-  assessment: Assessment | null;
-  studentText: string | null;
-  history: HistoryLine[];
-  calls: LlmCallTelemetry[];
-  started: number;
+function teachDecision(sub: Subconcept, check: CheckItem, state: SessionState, why: string): Decision {
+  const strategy = sub.strategies[state.strategyIndex];
+  return decisionFor("teach", `${why}, "${sub.title}", using strategy "${strategy.name}".`, strategy.id, sub, check);
 }
 
-const RESERVED_IDS = new Set<string>([QUESTION_IDS.text, QUESTION_IDS.math, "title"]);
-const NEW_TOPIC_ACTIONS = new Set<TutorAction>(["teach", "advance", "move_on_flagged", "complete", "review"]);
+function decisionFor(action: Decision["action"], reason: string, strategyId: string | null, sub: Subconcept | null, check: CheckItem | null): Decision {
+  return { action, reason, fromSubconceptId: null, toSubconceptId: sub?.id ?? null, strategyId, checkId: check?.id ?? null };
+}
 
-async function respond(deps: EngineDeps, a: RespondArgs): Promise<TurnResult> {
-  const c = deps.curriculum;
-  const t = deps.timeouts ?? DEFAULT_TIMEOUTS;
-  const { decision, nextState, prevState } = a;
-  const action = decision.action;
+/** respond() args for a session's first lesson turn: fresh board, question not yet shown. */
+function fresh(state: SessionState, history: HistoryLine[], started: number) {
+  return { prevState: { ...state, board: [], pendingCheckId: null }, nextState: state, assessment: null, studentText: null, history, calls: [], started };
+}
 
-  const prevSub = getSubconcept(c, prevState.subconceptId);
-  const sub = getSubconcept(c, nextState.subconceptId);
-
-  // Repeat: replay the last thing the tutor said, word for word. No LLM, no state change.
-  if (action === "repeat") {
-    const last = [...a.history].reverse().find((h) => h.role === "tutor")?.text;
-    const pending = getCheck(sub, nextState.pendingCheckId);
-    return {
-      speech: last ?? (pending ? `Here's the question again. ${pending.spoken}` : "Let's keep going."),
-      boardOps: [],
-      board: prevState.board,
-      decision,
-      assessment: a.assessment,
-      state: nextState,
-      telemetry: { promptVersion: PROMPT_VERSION, calls: a.calls, totalMs: Date.now() - a.started, degraded: false },
-      speechRate: a.assessment?.slower ? 0.75 : 1,
-    };
-  }
-
-  const answeredCheck = a.assessment?.intent === "answer" || a.assessment?.intent === "dont_know" ? getCheck(prevSub, prevState.pendingCheckId) : null;
-  const pendingCheck = getCheck(sub, nextState.pendingCheckId);
-  const strategy = sub?.strategies[nextState.strategyIndex] ?? null;
-
-  // 1. System board ops: fresh board + title for a new topic, then the pending question.
-  const pre: BoardOp[] = [];
-  // Last turn's "why that's right" block goes once the student has answered the next question.
-  if (answeredCheck) pre.push(...prevState.board.filter(isWhy).map((b) => ({ op: "remove" as const, id: b.id })));
-  if (NEW_TOPIC_ACTIONS.has(action)) {
-    pre.push({ op: "clear" }, { op: "write", id: "title", kind: "text", content: sub?.title ?? "All topics complete" });
-  }
-  let board = applyBoardOps(prevState.board, pre).board;
-  const questionOps = questionBoardOps(board, pendingCheck, prevState.pendingCheckId !== nextState.pendingCheckId);
-  board = applyBoardOps(board, questionOps).board;
-
-  // 2. LLM speech + board ops.
-  const ctx: ResponderContext = {
-    action,
-    decision,
-    subconcept: sub,
-    strategy,
-    previousSubconcept: prevSub,
-    answeredCheck,
-    assessment: a.assessment,
-    pendingCheck,
-    board,
-    history: a.history,
-    studentText: a.studentText,
-    flaggedTitles: c.subconcepts.filter((s) => nextState.progress[s.id]?.status === "needs_review").map((s) => s.title),
-    recentDecisions: prevState.recentDecisions ?? [],
-    celebrate: decision.celebrate ? (sub?.misconceptions.find((m) => m.id === decision.celebrate!.misconceptionId) ?? prevSub?.misconceptions.find((m) => m.id === decision.celebrate!.misconceptionId) ?? null) : null,
-    finishedTopicMistakes:
-      prevSub && prevSub.id !== sub?.id && ["advance", "move_on_flagged", "complete"].includes(action)
-        ? Object.entries(nextState.progress[prevSub.id]?.misconceptions ?? {})
-            .sort((x, y) => y[1] - x[1])
-            .flatMap(([id, n]) => {
-              const m = prevSub.misconceptions.find((mm) => mm.id === id);
-              return m ? [{ description: m.description, count: n, fixed: nextState.progress[prevSub.id].fixed.includes(id) }] : [];
-            })
-        : [],
-  };
-  const { value, telemetry } = await callJson({
-    role: "responder",
-    transport: deps.transport,
-    models: modelChain(deps.models.responder, deps.models),
-    messages: responderMessages(ctx),
-    schema: ResponderOutput,
-    validate: (v) => leakProblem({ board: [...v.board, ...v.solution.map((l, i) => ({ op: "write" as const, id: `why_${i}`, ...l }))] }, pendingCheck, prevState.pendingCheckId),
-    maxTokens: 900,
-    temperature: 0.5,
-    timeoutMs: t.responderMs,
-    budgetMs: t.responderBudgetMs,
-  });
-  a.calls.push(telemetry);
-
-  const out = value ?? cannedResponse(ctx);
-  const llmOps = sanitiseLlmOps(out.board, board);
-
-  // 3. After a correct answer, show WHY it was right: the worked solution of that question.
-  const whyOps: BoardOp[] = [];
-  if (answeredCheck && a.assessment?.correct) {
-    const lines = out.solution.length ? out.solution : [{ kind: "text" as const, content: answeredCheck.solution }];
-    whyOps.push({ op: "write", id: "why_title", kind: "text", content: `✓ Why that's right: ${answeredCheck.text}` });
-    if (answeredCheck.math) whyOps.push({ op: "write", id: "why_q", kind: "math", content: answeredCheck.math });
-    lines.forEach((l, i) => whyOps.push({ op: "write", id: `why_${i + 1}`, kind: l.kind, content: l.content }));
-  }
-  const applied = applyBoardOps(board, [...llmOps, ...whyOps]);
-  // On a new topic the "why" block sits at the top, above the fresh lesson; otherwise it follows the lesson.
-  const result = NEW_TOPIC_ACTIONS.has(action)
-    ? { ...applied, board: [...applied.board.filter(isWhy), ...applied.board.filter((b) => !isWhy(b))] }
-    : applied;
-
-  const speech = [cleanSpeech(out.speech), pendingCheck && action !== "complete" ? `${leadIn(action)} ${pendingCheck.spoken}` : ""]
-    .filter(Boolean)
-    .join(" ");
-
+function fixedTurn(state: SessionState, decision: Decision, speech: string, board: BoardItem[], started: number, extra: Partial<TurnResult> = {}): TurnResult {
   return {
     speech,
-    boardOps: [...pre, ...questionOps, ...result.applied],
-    board: result.board,
+    boardOps: [],
+    board,
     decision,
-    assessment: a.assessment,
-    state: {
-      ...nextState,
-      board: result.board,
-      recentDecisions: [...(prevState.recentDecisions ?? []), { action, reason: decision.reason }].slice(-MEMORY),
-    },
-    telemetry: {
-      promptVersion: PROMPT_VERSION,
-      calls: a.calls,
-      totalMs: Date.now() - a.started,
-      degraded: a.calls.some((call) => call.usedFallback),
-    },
+    assessment: null,
+    state: { ...state, board, recentDecisions: remember(state, decision) },
+    telemetry: { promptVersion: PROMPT_VERSION, calls: [], totalMs: Date.now() - started, degraded: false },
     speechRate: 1,
+    ...extra,
   };
 }
 
-/** How many past decisions the tutor remembers (and can explain). */
-const MEMORY = 4;
-
-const normMath = (s: string) => s.replace(/\\[,;!]|\\quad|\s/g, "");
-
-/**
- * Guard against the most common pedagogical failure: teaching with the very
- * question the student is about to be asked. Only checked when the question is
- * new this turn (re-asking an open question is fine to discuss).
- */
-function leakProblem(v: { board: BoardOp[] }, pending: CheckItem | null, previousCheckId: string | null): string | null {
-  if (!pending || pending.id === previousCheckId) return null;
-  const writes = v.board.flatMap((op) => (op.op === "write" ? [normMath(op.content)] : []));
-  if (pending.math) {
-    const target = normMath(pending.math.split("=")[0]);
-    const mathWrites = v.board.flatMap((op) => (op.op === "write" && op.kind === "math" ? [op.content] : []));
-    // Also catch sign-flipped copies (x^2 + 5x + 6 before asking x^2 - 5x + 6); check each "=" equation in a line.
-    const equations = mathWrites.flatMap((c) => c.split(/\\Rightarrow|\\quad|\\;|,|:/).filter((part) => part.includes("=")));
-    if (writes.some((w) => w.includes(target)) || equations.some((e) => nearDuplicate(e, pending.math!))) {
-      return `the board uses the upcoming question's equation (${pending.math}) or a sign-flipped copy of it; use a clearly different example`;
-    }
-    return null;
-  }
-  // Word problems: the story's distinctive numbers (e.g. 306, 528) must not appear on the board.
-  // Small numbers like 10 or 13 are too common in other examples to mean anything.
-  const numbers = [...new Set(pending.text.match(/\d+/g) ?? [])].filter((n) => Number(n) > 20);
-  const hit = numbers.find((n) => writes.some((w) => new RegExp(`(^|\\D)${n}(\\D|$)`).test(w)));
-  return hit ? `the board works through the upcoming word problem (it uses ${hit}); use a different example` : null;
+/** The welcome (and "take your time") turns. */
+function greeting(c: Curriculum, state: SessionState, started: number, kind: "welcome" | "wait"): TurnResult {
+  const board =
+    kind === "welcome"
+      ? applyBoardOps([], [
+          { op: "write", id: "title", kind: "text", content: "Welcome!" },
+          { op: "write", id: "w_1", kind: "text", content: `Quadratic equations in ${c.subconcepts.length} short steps` },
+          { op: "write", id: "w_2", kind: "math", content: "ax^2 + bx + c = 0" },
+          { op: "write", id: "w_3", kind: "text", content: "I explain → you try a question → we move on when it clicks" },
+          { op: "write", id: "w_4", kind: "text", content: "Speak or type · ask anything · say “repeat”" },
+          { op: "highlight", id: "w_2" },
+        ]).board
+      : state.board;
+  const decision = decisionFor(
+    "greet",
+    kind === "welcome" ? "First ever session: introducing Tara and how the lesson works, then waiting until the student is ready." : "Student asked to wait; holding the lesson until they're ready.",
+    null,
+    getSubconcept(c, state.subconceptId),
+    null,
+  );
+  const speech = kind === "welcome" ? welcomeSpeech(c) : "No problem, take your time. Just say ready when you want to start.";
+  return fixedTurn(state, decision, speech, board, started);
 }
 
-function questionBoardOps(board: BoardItem[], check: CheckItem | null, changed: boolean): BoardOp[] {
-  const has = (id: string) => board.some((b) => b.id === id);
-  if (!check) {
-    return [QUESTION_IDS.text, QUESTION_IDS.math].filter(has).map((id) => ({ op: "remove" as const, id }));
-  }
-  if (!changed && has(QUESTION_IDS.text)) return [];
-  const ops: BoardOp[] = [{ op: "write", id: QUESTION_IDS.text, kind: "text", content: `Your turn: ${check.text}` }];
-  if (check.math) ops.push({ op: "write", id: QUESTION_IDS.math, kind: "math", content: check.math });
-  else if (has(QUESTION_IDS.math)) ops.push({ op: "remove", id: QUESTION_IDS.math });
-  return ops;
+/** Returning to an open session (e.g. after a reload): re-ask the pending question. */
+function resumed(c: Curriculum, state: SessionState, sub: Subconcept | null, check: CheckItem | null, started: number): TurnResult {
+  const decision: Decision = {
+    ...decisionFor(sub ? "resume" : "complete", sub ? `Resuming a saved session at "${sub.title}".` : "Session already complete.", sub?.strategies[state.strategyIndex]?.id ?? null, sub, check),
+    fromSubconceptId: state.subconceptId,
+  };
+  const speech =
+    sub && check
+      ? `Welcome back! We were working on ${sub.title.toLowerCase()}. Let's pick up where we left off. ${check.spoken}`
+      : `Welcome back! You've already finished all ${c.subconcepts.length} topics. Great work.`;
+  return fixedTurn(state, decision, speech, state.board, started);
 }
 
-/** The LLM may not overwrite system lines, and "clear" only clears its own lines. */
-function sanitiseLlmOps(ops: BoardOp[], board: BoardItem[]): BoardOp[] {
-  return ops.flatMap((op): BoardOp[] => {
-    if (op.op === "clear") return board.filter((b) => !RESERVED_IDS.has(b.id)).map((b) => ({ op: "remove", id: b.id }));
-    if (op.op === "write" && (RESERVED_IDS.has(op.id) || isWhy(op))) return [];
-    if (op.op === "remove") return [];
-    // Plain-text lines aren't rendered as LaTeX; make "x^2" read as "x²".
-    if (op.op === "write" && op.kind === "text") return [{ ...op, content: op.content.replace(/\^2/g, "²").replace(/\^3/g, "³") }];
-    return [op];
-  });
-}
-
-function leadIn(action: TutorAction): string {
-  switch (action) {
-    case "next_check":
-      return "Here's another one.";
-    case "answer_question":
-    case "redirect":
-    case "clarify":
-      return "So, back to our question.";
-    case "review":
-      return "Here's your warm-up.";
-    default:
-      return "Now, your turn.";
-  }
-}
-
-/** TTS reads symbols literally; strip what slipped through the prompt. */
-export function cleanSpeech(s: string): string {
-  return s
-    .replace(/\$+/g, "")
-    .replace(/\\[a-zA-Z]+/g, " ")
-    .replace(/\^2/g, " squared")
-    .replace(/[{}\\]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-// ---------------------------------------------------------------------------
-// Canned responses: the tutor keeps teaching from curriculum scripts when the
-// LLM is unavailable. Less personal, still correct.
-
-function cannedResponse(ctx: ResponderContext): { speech: string; board: BoardOp[]; solution: { kind: "text" | "math"; content: string }[] } {
-  return { solution: [], ...cannedSpeechAndBoard(ctx) };
-}
-
-function cannedSpeechAndBoard(ctx: ResponderContext): { speech: string; board: BoardOp[] } {
-  const script = ctx.strategy?.fallback;
-  const scriptOps: BoardOp[] = (script?.board ?? []).map((b, i) => ({ op: "write", id: `fb_${i + 1}`, kind: b.kind, content: b.content }));
-  const missed = ctx.answeredCheck ? ` The answer was ${describeAnswer(ctx.answeredCheck.answer)}.` : "";
-
-  switch (ctx.action) {
-    case "teach":
-      return { speech: script?.speech ?? "", board: scriptOps };
-    case "advance":
-      return { speech: `That's right, well done. You've got this topic. Next: ${ctx.subconcept?.title}. ${script?.speech ?? ""}`, board: scriptOps };
-    case "reteach":
-      return { speech: `Not quite.${missed} Let's look at it another way. ${script?.speech ?? ""}`, board: scriptOps };
-    case "move_on_flagged":
-      return { speech: `That one is tricky.${missed} We'll come back to it later. Next: ${ctx.subconcept?.title}. ${script?.speech ?? ""}`, board: scriptOps };
-    case "next_check":
-      return { speech: "That's right, well done.", board: [] };
-    case "answer_question":
-      return { speech: "Good question. Let's keep going, and I'll explain more as we work through it.", board: [] };
-    case "redirect":
-      return { speech: "Let's get back to our maths.", board: [] };
-    case "clarify":
-      return { speech: "Sorry, I didn't catch that. Could you say your answer again?", board: [] };
-    case "complete":
-      return { speech: "Congratulations! You've worked through all six topics on quadratic equations.", board: [] };
-    case "review":
-      return { speech: `Welcome back! Let's start with a quick warm-up from ${ctx.subconcept?.title.toLowerCase() ?? "last time"}, to check it stuck.`, board: [] };
-    case "repeat":
-      return { speech: "", board: [] };
-    case "greet":
-      return { speech: WELCOME, board: [] };
-  }
+/** "Repeat that": the last thing the tutor said, word for word; slower if asked. */
+function replay(prev: SessionState, next: SessionState, decision: Decision, assessment: Assessment, history: HistoryLine[], pending: CheckItem, calls: LlmCallTelemetry[], started: number): TurnResult {
+  const last = [...history].reverse().find((h) => h.role === "tutor")?.text;
+  return {
+    speech: last ?? `Here's the question again. ${pending.spoken}`,
+    boardOps: [],
+    board: prev.board,
+    decision,
+    assessment,
+    // Not remembered as a decision: "why did you…" questions should see the last real one.
+    state: next,
+    telemetry: { promptVersion: PROMPT_VERSION, calls, totalMs: Date.now() - started, degraded: false },
+    speechRate: assessment.slower ? 0.75 : 1,
+  };
 }

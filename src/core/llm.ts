@@ -137,29 +137,42 @@ export class LlmError extends Error {
 
 // ---------------------------------------------------------------------------
 
-const breaker = new Map<string, { failures: number; openUntil: number }>();
-const BREAKER_THRESHOLD = 3;
-const BREAKER_COOLDOWN_MS = 30_000;
+/**
+ * What the client has learned about model and provider health: a per-model
+ * circuit breaker, and providers known to be down (out of credit, bad key).
+ * One shared instance serves the Worker; evals give every run its own, so
+ * concurrent scenarios can't trip each other's breakers.
+ */
+export class ProviderHealth {
+  private breaker = new Map<string, { failures: number; openUntil: number }>();
+  private providerDown = new Map<string, number>();
 
-function breakerOpen(model: string, now: number) {
-  const b = breaker.get(model);
-  return !!b && b.openUntil > now;
-}
-function recordResult(model: string, ok: boolean, now: number) {
-  const b = breaker.get(model) ?? { failures: 0, openUntil: 0 };
-  if (ok) b.failures = 0;
-  else if (++b.failures >= BREAKER_THRESHOLD) b.openUntil = now + BREAKER_COOLDOWN_MS;
-  breaker.set(model, b);
-}
-export function resetBreakers() {
-  breaker.clear();
-  providerDown.clear();
+  static readonly BREAKER_THRESHOLD = 3;
+  static readonly BREAKER_COOLDOWN_MS = 30_000;
+  // Out of credit / bad key is provider-wide: skip every model on that provider
+  // for a while instead of rediscovering it model by model, turn by turn.
+  static readonly PROVIDER_COOLDOWN_MS = 5 * 60_000;
+
+  isModelOpen(model: string, now = Date.now()) {
+    return (this.breaker.get(model)?.openUntil ?? 0) > now;
+  }
+  isProviderDown(provider: string, now = Date.now()) {
+    return (this.providerDown.get(provider) ?? 0) > now;
+  }
+  record(model: string, ok: boolean, now = Date.now()) {
+    const b = this.breaker.get(model) ?? { failures: 0, openUntil: 0 };
+    if (ok) b.failures = 0;
+    else if (++b.failures >= ProviderHealth.BREAKER_THRESHOLD) b.openUntil = now + ProviderHealth.BREAKER_COOLDOWN_MS;
+    this.breaker.set(model, b);
+  }
+  markProviderDown(provider: string, now = Date.now()) {
+    this.providerDown.set(provider, now + ProviderHealth.PROVIDER_COOLDOWN_MS);
+  }
 }
 
-// Out of credit / bad key is a provider-wide condition: skip every model on that
-// provider for a while instead of discovering it again model by model, turn by turn.
-const providerDown = new Map<string, number>();
-const PROVIDER_COOLDOWN_MS = 5 * 60_000;
+/** Shared by everything in one Worker isolate. */
+export const sharedHealth = new ProviderHealth();
+
 const PROVIDER_FATAL = /\b(http_401|http_402|http_403|no_provider)\b/;
 
 /** Pull the first JSON object out of a response, tolerating code fences and chatter. */
@@ -187,6 +200,7 @@ export interface JsonCallOptions<T> {
   temperature?: number;
   timeoutMs: number; // per attempt
   budgetMs: number; // whole chain; the student is waiting on this
+  health?: ProviderHealth; // defaults to sharedHealth
 }
 
 export async function callJson<T>(opts: JsonCallOptions<T>): Promise<{ value: T | null; telemetry: LlmCallTelemetry }> {
@@ -202,6 +216,8 @@ export async function callJson<T>(opts: JsonCallOptions<T>): Promise<{ value: T 
   const started = Date.now();
   let messages = opts.messages;
 
+  const health = opts.health ?? sharedHealth;
+
   for (const [i, model] of opts.models.entries()) {
     const remaining = opts.budgetMs - (Date.now() - started);
     if (remaining < 500) {
@@ -212,54 +228,67 @@ export async function callJson<T>(opts: JsonCallOptions<T>): Promise<{ value: T 
     const prev = telemetry.attempts[telemetry.attempts.length - 1];
     if (i > 0 && opts.models[i - 1] === model && prev?.error === "timeout") continue;
     const provider = splitModel(model).provider;
-    if ((providerDown.get(provider) ?? 0) > Date.now()) {
+    if (health.isProviderDown(provider)) {
       telemetry.attempts.push({ model, ok: false, ms: 0, error: `provider_down:${provider}` });
       continue;
     }
-    if (breakerOpen(model, Date.now())) {
+    if (health.isModelOpen(model)) {
       telemetry.attempts.push({ model, ok: false, ms: 0, error: "circuit_open" });
       continue;
     }
+
     const t0 = Date.now();
+    const cappedByBudget = remaining < opts.timeoutMs;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), Math.min(opts.timeoutMs, remaining));
+    let text: string;
     try {
-      const res = await opts.transport.complete({
-        model,
-        messages,
-        maxTokens: opts.maxTokens,
-        temperature: opts.temperature ?? 0.4,
-        signal: ctrl.signal,
-      });
+      const res = await opts.transport.complete({ model, messages, maxTokens: opts.maxTokens, temperature: opts.temperature ?? 0.4, signal: ctrl.signal });
       telemetry.tokensIn += res.tokensIn;
       telemetry.tokensOut += res.tokensOut;
-      const parsed = opts.schema.safeParse(extractJson(res.text));
-      if (!parsed.success) {
-        throw new LlmError("schema_invalid", parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "));
-      }
-      const problem = opts.validate?.(parsed.data);
-      if (problem) {
-        // The model is healthy, the answer isn't: retry with feedback instead of tripping the breaker.
-        telemetry.attempts.push({ model, ok: false, ms: Date.now() - t0, error: `rejected: ${problem}` });
-        messages = [...opts.messages, { role: "assistant", content: res.text }, { role: "user", content: `That reply was rejected: ${problem}. Send a corrected JSON reply.` }];
-        continue;
-      }
-      recordResult(model, true, Date.now());
-      telemetry.attempts.push({ model, ok: true, ms: Date.now() - t0 });
-      telemetry.model = model;
-      telemetry.ms = Date.now() - started;
-      return { value: parsed.data, telemetry };
+      text = res.text;
     } catch (err) {
-      const error = ctrl.signal.aborted ? "timeout" : err instanceof LlmError ? err.message : String(err);
-      recordResult(model, false, Date.now());
-      if (PROVIDER_FATAL.test(error)) providerDown.set(provider, Date.now() + PROVIDER_COOLDOWN_MS);
+      // Transport failure. Only a real per-attempt timeout counts against the model:
+      // an attempt cut short by the overall budget says nothing about its health.
+      const aborted = ctrl.signal.aborted;
+      const error = aborted ? (cappedByBudget ? "budget_timeout" : "timeout") : err instanceof LlmError ? err.message : String(err);
+      if (!(aborted && cappedByBudget)) health.record(model, false);
+      if (PROVIDER_FATAL.test(error)) health.markProviderDown(provider);
       telemetry.attempts.push({ model, ok: false, ms: Date.now() - t0, error: error.slice(0, 300) });
+      continue;
     } finally {
       clearTimeout(timer);
     }
+
+    // The model answered. Bad content (not JSON, wrong shape, rejected by the
+    // validator) is retried with feedback; it is not a transport failure, so it
+    // doesn't trip the breaker.
+    health.record(model, true);
+    const problem = contentProblem(text, opts);
+    if (problem.ok) {
+      telemetry.attempts.push({ model, ok: true, ms: Date.now() - t0 });
+      telemetry.model = model;
+      telemetry.ms = Date.now() - started;
+      return { value: problem.value, telemetry };
+    }
+    telemetry.attempts.push({ model, ok: false, ms: Date.now() - t0, error: problem.error.slice(0, 300) });
+    messages = [...opts.messages, { role: "assistant", content: text }, { role: "user", content: `That reply was rejected: ${problem.error}. Send a corrected JSON reply.` }];
   }
 
   telemetry.ms = Date.now() - started;
   telemetry.usedFallback = true;
   return { value: null, telemetry };
+}
+
+function contentProblem<T>(text: string, opts: JsonCallOptions<T>): { ok: true; value: T } | { ok: false; error: string } {
+  let json: unknown;
+  try {
+    json = extractJson(text);
+  } catch {
+    return { ok: false, error: "not_json: the reply was not a JSON object" };
+  }
+  const parsed = opts.schema.safeParse(json);
+  if (!parsed.success) return { ok: false, error: `schema_invalid: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` };
+  const rejected = opts.validate?.(parsed.data);
+  return rejected ? { ok: false, error: `rejected: ${rejected}` } : { ok: true, value: parsed.data };
 }

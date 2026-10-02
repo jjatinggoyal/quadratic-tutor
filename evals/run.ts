@@ -4,7 +4,7 @@ import { z } from "zod";
 import { quadratics } from "../src/core/curriculum/quadratics";
 import { openingTurn, runTurn, type EngineDeps } from "../src/core/engine";
 import { describeAnswer } from "../src/core/grader";
-import { callJson, resetBreakers } from "../src/core/llm";
+import { callJson, ProviderHealth } from "../src/core/llm";
 import { getCheck, getSubconcept } from "../src/core/policy";
 import { PROMPT_VERSION } from "../src/core/prompts";
 import type { TurnResult } from "../src/core/types";
@@ -29,6 +29,10 @@ const opt = (name: string) => {
   return i >= 0 ? args[i + 1] : undefined;
 };
 const RUNS = Number(opt("runs") ?? 3);
+if (!Number.isInteger(RUNS) || RUNS < 1) {
+  console.error(`--runs must be a positive integer (got ${opt("runs")})`);
+  process.exit(2);
+}
 const ONLY = opt("only")?.split(",");
 const CONCURRENCY = 4;
 const BASELINE = new URL("./baseline.json", import.meta.url);
@@ -53,8 +57,11 @@ interface ScenarioOutcome {
 const { transport: realTransport, models } = nodeDeps();
 
 async function runOnce(s: Scenario): Promise<RunOutcome> {
-  resetBreakers(); // scenarios must not affect each other through the circuit breaker
+  // Each run gets its own breaker/provider-down state: runs execute concurrently, and one
+  // scenario's simulated outage must not leak into another's (or into the judge).
+  const health = new ProviderHealth();
   const deps: EngineDeps = {
+    health,
     curriculum: quadratics,
     transport: s.transport ? s.transport(realTransport, models) : realTransport,
     models,
@@ -63,7 +70,7 @@ async function runOnce(s: Scenario): Promise<RunOutcome> {
   const before = s.state();
   const r = s.opening ? await openingTurn(deps, before, s.history ?? []) : await runTurn(deps, before, s.history ?? [], s.student);
   const failures = [...deterministicChecks(s, before, r)];
-  if (s.expect.judge?.length && failures.length === 0) failures.push(...(await judge(s, before, r)));
+  if (s.expect.judge?.length && failures.length === 0) failures.push(...(await judge(s, before, r, new ProviderHealth())));
   return { ok: failures.length === 0, failures, action: r.decision.action, speech: r.speech, totalMs: r.telemetry.totalMs };
 }
 
@@ -120,7 +127,7 @@ const JudgeOutput = z.object({
   results: z.array(z.object({ criterion: z.string(), pass: z.boolean(), reason: z.string() })),
 });
 
-async function judge(s: Scenario, before: ReturnType<Scenario["state"]>, r: TurnResult): Promise<string[]> {
+async function judge(s: Scenario, before: ReturnType<Scenario["state"]>, r: TurnResult, health: ProviderHealth): Promise<string[]> {
   const sub = getSubconcept(quadratics, before.subconceptId)!;
   const asked = getCheck(sub, before.pendingCheckId)!;
   const pending = getCheck(getSubconcept(quadratics, r.state.subconceptId), r.state.pendingCheckId);
@@ -131,7 +138,10 @@ async function judge(s: Scenario, before: ReturnType<Scenario["state"]>, r: Turn
   const { value, telemetry } = await callJson({
     role: "responder",
     transport: realTransport,
+    health,
     models: [JUDGE_MODEL, JUDGE_MODEL],
+    // A verdict must cover every criterion; a short or empty list is a failed call, not a pass.
+    validate: (v) => (v.results.length === criteria.length ? null : `expected ${criteria.length} results, one per criterion, got ${v.results.length}`),
     maxTokens: 2000,
     temperature: 0,
     timeoutMs: 30_000,
@@ -187,12 +197,16 @@ async function main() {
     console.log(`Curriculum lint failed:\n${lint.map((e) => `  ✗ ${e}`).join("\n")}`);
     process.exit(1);
   }
+  const unknown = ONLY?.filter((id) => !scenarios.some((s) => s.id === id)) ?? [];
+  if (unknown.length) {
+    console.error(`Unknown scenario id(s): ${unknown.join(", ")}`);
+    process.exit(2);
+  }
   const selected = scenarios.filter((s) => !ONLY || ONLY.includes(s.id));
   console.log(`Evals: ${selected.length} scenarios · prompt ${PROMPT_VERSION} · assessor ${models.assessor} · responder ${models.responder} · fallback ${models.fallback} · judge ${JUDGE_MODEL}\n`);
 
-  // Scenarios with a fully fake transport are deterministic: one run is enough.
-  const deterministic = (s: Scenario) => (!!s.transport && !s.id.includes("outage") && !s.id.includes("out-of-credit")) || ["welcome-first", "not-ready-waits"].includes(s.id);
-  const jobs = selected.flatMap((s) => Array.from({ length: deterministic(s) ? 1 : RUNS }, () => s));
+  // Scenarios that never reach a real model are deterministic: one run is enough.
+  const jobs = selected.flatMap((s) => Array.from({ length: s.deterministic ? 1 : RUNS }, () => s));
   const t0 = Date.now();
   const results = await pool(jobs, CONCURRENCY, async (s) => ({ id: s.id, run: await runOnce(s).catch((err) => ({ ok: false, failures: [`crashed: ${err}`], action: "-", speech: "", totalMs: 0 })) }));
 
@@ -206,8 +220,9 @@ async function main() {
   let regressions = 0;
   for (const o of outcomes) {
     const was = baseline[o.id];
-    const tag = o.pass ? (was === false ? "NEW PASS" : "pass") : was === true ? "REGRESSION" : "fail";
-    if (tag === "REGRESSION") regressions++;
+    // A scenario missing from the baseline is new: its failure counts too, so a new broken scenario can't slip in.
+    const tag = o.pass ? (was === false ? "NEW PASS" : "pass") : was === false ? "fail (known)" : was === true ? "REGRESSION" : "FAIL (new)";
+    if (tag === "REGRESSION" || tag === "FAIL (new)") regressions++;
     console.log(`${o.pass ? "✓" : "✗"} ${o.id.padEnd(32)} ${`${o.passedRuns}/${o.runs}`.padEnd(5)} ${tag}`);
     if (!o.pass || flag("verbose")) {
       const seen = new Set<string>();
@@ -224,9 +239,11 @@ async function main() {
   console.log(`Details: ${file.pathname}`);
 
   if (flag("update-baseline")) {
-    writeFileSync(BASELINE, JSON.stringify({ promptVersion: PROMPT_VERSION, models, updatedAt: new Date().toISOString(), scenarios: Object.fromEntries(outcomes.map((o) => [o.id, o.pass])) }, null, 2) + "\n");
-    console.log("Baseline updated.");
-  } else if (regressions > 0 || (!existsSync(BASELINE) && passed < outcomes.length)) {
+    // Merge: updating with --only must not drop the other scenarios from the baseline.
+    const merged = { ...baseline, ...Object.fromEntries(outcomes.map((o) => [o.id, o.pass])) };
+    writeFileSync(BASELINE, JSON.stringify({ promptVersion: PROMPT_VERSION, models, updatedAt: new Date().toISOString(), scenarios: merged }, null, 2) + "\n");
+    console.log(`Baseline updated (${outcomes.length} scenario(s) merged).`);
+  } else if (regressions > 0) {
     process.exit(1);
   }
 }

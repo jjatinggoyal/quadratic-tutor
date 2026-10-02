@@ -49,6 +49,8 @@ export interface Scenario {
   /** Override the transport (resilience scenarios). Receives the real one. */
   transport?: (real: LlmTransport, models: { assessor: string; responder: string; fallback: string }) => LlmTransport;
   timeouts?: { assessorMs: number; responderMs: number; assessorBudgetMs: number; responderBudgetMs: number };
+  /** Never reaches a real model (fake transport or a no-LLM path), so one run is enough. */
+  deterministic?: boolean;
   expect: Expect;
 }
 
@@ -61,6 +63,7 @@ export const scenarios: Scenario[] = [
   // ------------------------------------------------------------- first contact
   {
     id: "welcome-first",
+    deterministic: true,
     catches: "A new student being thrown straight into the lesson without a greeting or a moment to get ready.",
     state: () => initialState(quadratics),
     opening: true,
@@ -80,6 +83,7 @@ export const scenarios: Scenario[] = [
   },
   {
     id: "not-ready-waits",
+    deterministic: true,
     catches: "The tutor starting the lesson while the student asked for a moment.",
     state: () => initialState(quadratics),
     student: "wait, one minute",
@@ -255,6 +259,7 @@ export const scenarios: Scenario[] = [
   // ------------------------------------------------------------- asking for help
   {
     id: "repeat-verbatim",
+    deterministic: true,
     catches: "'Repeat that' producing a paraphrase (or a slow LLM round trip) instead of the same words again.",
     state: () => stateAt("factorisation", "fa_monic_neg"),
     history: [{ role: "tutor", text: TAUGHT }],
@@ -268,6 +273,7 @@ export const scenarios: Scenario[] = [
   },
   {
     id: "slower-please",
+    deterministic: true,
     catches: "'Slower please' being answered with new words at the same speed.",
     state: () => stateAt("factorisation", "fa_monic_neg"),
     history: [{ role: "tutor", text: TAUGHT }],
@@ -384,6 +390,7 @@ export const scenarios: Scenario[] = [
   // ------------------------------------------------------------- resilience
   {
     id: "llm-timeout",
+    deterministic: true,
     catches: "A hung provider hanging the student's turn instead of degrading.",
     state: () => stateAt("factorisation", "fa_monic_mixed"),
     student: "minus four and three",
@@ -393,6 +400,7 @@ export const scenarios: Scenario[] = [
   },
   {
     id: "llm-garbage",
+    deterministic: true,
     catches: "Non-JSON model output crashing the turn or reaching the student.",
     state: () => stateAt("roots", "rt_two_yes"),
     student: "no",
@@ -427,6 +435,7 @@ export const scenarios: Scenario[] = [
   },
   {
     id: "bad-board-ops",
+    deterministic: true,
     catches: "The LLM overwriting the question on the board or highlighting lines that don't exist.",
     state: () => stateAt("roots", "rt_two_yes"),
     student: "yes",

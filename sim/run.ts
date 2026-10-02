@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { z } from "zod";
 import { quadratics } from "../src/core/curriculum/quadratics";
 import { initialState, openingTurn, runTurn, type EngineDeps } from "../src/core/engine";
-import { grade } from "../src/core/grader";
+import { grade, parseNumber } from "../src/core/grader";
 import { callJson } from "../src/core/llm";
 import { getCheck, getSubconcept } from "../src/core/policy";
 import type { HistoryLine } from "../src/core/prompts";
@@ -53,17 +53,19 @@ Your character: ${p.style}
 ${DIRECTIVE_TEXT[directive]}
 Respond as JSON: {"reply": "...", "my_answer": ...} where my_answer is the final answer your reply gives (${answerFormat(check)}), or null if your reply gives no final answer.`;
 
-/** Ground truth for grading accuracy: grade what the simulated student says it answered. */
+/**
+ * Ground truth for grading accuracy: grade what the simulated student says it
+ * answered. Returns null (unknown) when that answer isn't in the requested
+ * format, so a parsing failure here is never blamed on the tutor.
+ */
 function truth(check: CheckItem | null, myAnswer: string | null | undefined): boolean | null {
   if (!check || !myAnswer) return null;
   const a = check.answer;
-  const extracted =
-    a.type === "yes_no"
-      ? { yesNo: /^y/i.test(myAnswer.trim()) }
-      : a.type === "choice"
-        ? { choice: myAnswer.trim() }
-        : { numbers: myAnswer.split(/[,;]| and /).map((x) => x.trim()).filter(Boolean) };
-  return grade(a, extracted);
+  const said = myAnswer.trim().toLowerCase();
+  if (a.type === "yes_no") return /^(yes|no)\b/.test(said) ? grade(a, { yesNo: said.startsWith("yes") }) : null;
+  if (a.type === "choice") return a.options.some((o) => o.id === said) ? grade(a, { choice: said }) : null;
+  const numbers = said.replace(/x\s*=\s*/g, "").split(/[,;]|\band\b|\bor\b/).map((x) => x.trim()).filter(Boolean);
+  return numbers.length && numbers.every((n) => parseNumber(n) !== null) ? grade(a, { numbers }) : null;
 }
 
 function seededRng(seed: number) {

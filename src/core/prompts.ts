@@ -90,6 +90,7 @@ const ACTION_BRIEF: Record<TutorAction, string> = {
     "A returning student is starting a new session. Welcome them back warmly in one sentence and say you'll start with a quick warm-up question on the topic below (name it), to check it stuck. Do not teach or give hints.",
   repeat: "Not used: repeats are replayed without the LLM.",
   greet: "Not used: the welcome is fixed text.",
+  resume: "Not used: resuming is fixed text.",
 };
 
 const WORD_LIMIT: Record<TutorAction, number> = {
@@ -105,6 +106,7 @@ const WORD_LIMIT: Record<TutorAction, number> = {
   review: 40,
   repeat: 0,
   greet: 0,
+  resume: 0,
 };
 
 export interface ResponderContext {
