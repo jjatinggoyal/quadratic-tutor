@@ -1,6 +1,7 @@
 import { progressRows, type DecisionLogRow, type SessionResponse, type TurnRequest, type TurnView } from "../core/api";
 import { quadratics } from "../core/curriculum/quadratics";
 import { openingTurn, rebaseState, runTurn, stateFromProgress, type EngineDeps } from "../core/engine";
+import { startReview } from "../core/policy";
 import { OpenRouterTransport } from "../core/llm";
 import type { TurnResult } from "../core/types";
 import { ConflictError, TutorDb, type SessionRow } from "./db";
@@ -15,6 +16,7 @@ export interface Env {
   MODEL_FALLBACK: string;
   MODEL_STT: string;
   MODEL_STT_FALLBACK: string;
+  SESSION_TIMEOUT_MIN?: string;
 }
 
 const curriculum = quadratics;
@@ -77,18 +79,29 @@ function deps(env: Env): EngineDeps {
 // ---------------------------------------------------------------------------
 
 async function startSession(req: Request, env: Env, db: TutorDb): Promise<Response> {
-  const body = await readJson<{ studentId?: string; forceNew?: boolean }>(req);
+  const body = await readJson<{ studentId?: string; forceNew?: boolean; simulated?: boolean }>(req);
   const now = Date.now();
   const studentId = validId(body.studentId) ?? crypto.randomUUID();
-  await db.ensureStudent(studentId, now);
+  await db.ensureStudent(studentId, now, body.simulated === true);
 
-  let session = body.forceNew ? null : await db.latestActiveSession(studentId);
+  // A session is one sitting. After SESSION_TIMEOUT_MIN of inactivity the next
+  // visit starts a new session (from saved progress, with a warm-up check).
+  const timeoutMs = Number(env.SESSION_TIMEOUT_MIN ?? 30) * 60_000;
+  let session = await db.latestActiveSession(studentId);
+  if (session && (body.forceNew || now - session.updated_at > timeoutMs)) {
+    await db.closeSession(session.id, body.forceNew ? "restarted" : "inactive", now);
+    session = null;
+  }
   const resumed = !!session;
   if (!session) {
-    const state = stateFromProgress(curriculum, await db.loadProgress(studentId));
+    const { progress, masteredAt } = await db.loadProgress(studentId);
+    let fresh = stateFromProgress(curriculum, progress);
+    // Retention: open with a question from the most recently mastered topic.
+    const lastMastered = Object.entries(masteredAt).sort((a, b) => b[1] - a[1])[0]?.[0];
+    if (lastMastered) fresh = startReview(curriculum, fresh, lastMastered);
     const id = crypto.randomUUID();
-    await db.createSession(id, studentId, state, now);
-    session = { id, student_id: studentId, status: "active", state, turn_count: 0 };
+    const sessionNumber = await db.createSession(id, studentId, fresh, now);
+    session = { id, student_id: studentId, status: "active", state: fresh, turn_count: 0, session_number: sessionNumber, updated_at: now };
   }
 
   const state = rebaseState(session.state, curriculum);
@@ -101,7 +114,7 @@ async function startSession(req: Request, env: Env, db: TutorDb): Promise<Respon
     seq = await db.saveTurn({ session, prevState: state, result, studentText: null, inputSource: null, clientTurnId: null, clientTimings: null, now });
   }
   logTurn(session.id, seq, result, null);
-  const out: SessionResponse = { studentId, sessionId: session.id, resumed, turn: view(seq, result) };
+  const out: SessionResponse = { studentId, sessionId: session.id, sessionNumber: session.session_number, resumed, turn: view(seq, result) };
   return json(out);
 }
 
@@ -158,6 +171,10 @@ function view(seq: number, r: TurnResult): TurnView {
     progress: progressRows(curriculum, r.state),
     complete: r.state.subconceptId === null,
     degraded: r.telemetry.degraded,
+    speechRate: r.speechRate,
+    streak: r.state.streak,
+    review: r.state.review !== null,
+    celebrate: celebrateView(r),
     timings: {
       totalMs: r.telemetry.totalMs,
       assessorMs: r.telemetry.calls.find((c) => c.role === "assessor")?.ms ?? null,
@@ -184,9 +201,21 @@ function replayView(t: NonNullable<Awaited<ReturnType<TutorDb["findTurnByClientI
     progress: progressRows(curriculum, state),
     complete: state.subconceptId === null,
     degraded: t.degraded === 1,
+    speechRate: 1,
+    streak: state.streak ?? 0,
+    review: !!state.review,
+    celebrate: null,
     timings: { totalMs: t.total_ms, assessorMs: null, responderMs: null },
   };
 }
+
+function celebrateView(r: TurnResult): TurnView["celebrate"] {
+  const id = r.decision.celebrate?.misconceptionId;
+  if (!id) return null;
+  const m = curriculum.subconcepts.flatMap((s) => s.misconceptions).find((x) => x.id === id);
+  return m ? { misconceptionId: id, label: m.label } : null;
+}
+
 
 /** One structured line per turn → Workers Logs (see DESIGN.md, Observability). */
 function logTurn(sessionId: string, seq: number, r: TurnResult, clientTimings: unknown) {
