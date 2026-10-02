@@ -90,6 +90,23 @@ export const scenarios: Scenario[] = [
     expect: { action: "greet", custom: (r) => (!r.state.awaitingStart ? "started anyway" : r.telemetry.calls.length ? "used an LLM call" : null) },
   },
   {
+    id: "no-problem-is-ready",
+    catches: "A reply like 'no problem, let's go' being read as 'not ready' because it contains the word no.",
+    state: () => initialState(quadratics),
+    student: "no problem, let's go",
+    expect: { action: "teach", custom: (r) => (r.state.awaitingStart ? "still waiting" : null) },
+  },
+  {
+    id: "reload-after-welcome",
+    catches: "Reloading after the welcome skipping the lesson and jumping straight to the first question.",
+    state: () => initialState(quadratics),
+    opening: true,
+    deterministic: true,
+    history: [{ role: "tutor", text: "Hi, I'm Tara… Ready to begin?" }],
+    student: "",
+    expect: { action: "greet", custom: (r) => (r.board.some((b) => b.id === "q_text") ? "question already on the board" : null) },
+  },
+  {
     id: "ready-with-question",
     catches: "A question in the student's first reply being ignored.",
     state: () => initialState(quadratics),
@@ -125,6 +142,13 @@ export const scenarios: Scenario[] = [
     state: () => stateAt("roots", "rt_neg_three_yes"),
     student: "no, because minus 3 squared plus minus 3 minus 6 is 9 minus 3 minus 6, which is zero",
     expect: { intent: "unclear", action: "clarify", pendingUnchanged: true, judge: ["Gently points out that the student's working gives zero, which conflicts with their 'no', and asks them to decide."] },
+  },
+  {
+    id: "again-is-not-repeat",
+    catches: "An answer containing 'again' (\"minus four and three again\") being swallowed as a repeat request.",
+    state: () => stateAt("factorisation", "fa_monic_mixed"),
+    student: "minus four and three again",
+    expect: { intent: "answer", correct: true, action: "next_check" },
   },
   {
     id: "one-root-only",

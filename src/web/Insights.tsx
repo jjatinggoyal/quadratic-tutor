@@ -32,10 +32,14 @@ export function InsightsPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // Abort the previous filter's request so a slow, older response can't overwrite this one.
+    const ctrl = new AbortController();
     setData(null);
-    fetch(`/api/insights?sim=${sim}`)
+    setError(null);
+    fetch(`/api/insights?sim=${sim}`, { signal: ctrl.signal })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then(setData, (e) => setError(String(e)));
+      .then(setData, (e) => !ctrl.signal.aborted && setError(String(e)));
+    return () => ctrl.abort();
   }, [sim]);
 
   return (

@@ -35,6 +35,7 @@ export function decisionLogRows(rows: Awaited<ReturnType<TutorDb["decisionLog"]>
     seq: r.seq,
     createdAt: r.created_at,
     studentText: r.student_text,
+    tutorSpeech: r.tutor_speech,
     subconceptId: r.subconcept_id,
     action: r.action,
     reason: r.reason,

@@ -129,9 +129,9 @@ export class TutorDb {
 
   async decisionLog(sessionId: string) {
     const { results } = await this.db
-      .prepare("SELECT seq, created_at, student_text, subconcept_id, action, reason, correct, degraded, total_ms FROM turns WHERE session_id = ? ORDER BY seq")
+      .prepare("SELECT seq, created_at, student_text, tutor_speech, subconcept_id, action, reason, correct, degraded, total_ms FROM turns WHERE session_id = ? ORDER BY seq")
       .bind(sessionId)
-      .all<{ seq: number; created_at: number; student_text: string | null; subconcept_id: string | null; action: string; reason: string; correct: number | null; degraded: number; total_ms: number }>();
+      .all<{ seq: number; created_at: number; student_text: string | null; tutor_speech: string; subconcept_id: string | null; action: string; reason: string; correct: number | null; degraded: number; total_ms: number }>();
     return results;
   }
 

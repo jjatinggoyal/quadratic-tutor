@@ -2,18 +2,23 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { InputSource, ProgressRow, TurnView } from "../core/api";
 import type { BoardItem } from "../core/types";
 import { api, ApiError } from "./api";
-import { DecisionLog, type LogEntry } from "./components/DecisionLog";
+import { AnswerControls, type Phase } from "./components/AnswerControls";
+import type { LogEntry } from "./components/DecisionLog";
 import { ProgressRail } from "./components/ProgressRail";
+import { SidePanel, type ChatLine } from "./components/SidePanel";
+import { TopBar, type Settings } from "./components/TopBar";
+import { WelcomeScreen } from "./components/WelcomeScreen";
 import { Whiteboard } from "./components/Whiteboard";
-import { browserSttAvailable, listenWithBrowser, listenWithServer, serverSttAvailable, Speaker, type Listener } from "./voice";
+import { load, save } from "./storage";
+import { browserSttAvailable, serverSttAvailable, VoiceLoop, type SttMode } from "./voice";
 
-type Phase = "welcome" | "loading" | "speaking" | "idle" | "listening" | "transcribing" | "thinking" | "error" | "complete";
-type SttMode = "browser" | "server";
-
-interface ChatLine {
-  role: "tutor" | "student";
-  text: string;
-}
+// The tutor screen. The voice loop is: Tara speaks → (hands-free) listen →
+// transcript → POST /api/turn → apply the turn → Tara speaks…
+//
+// `turnToken` is the guard against races: every user action (speaking,
+// typing, Repeat) and every new turn takes a new token, and the async
+// continuation of an older turn (e.g. "she finished speaking, open the mic")
+// checks it and gives up if it is stale.
 
 interface PendingSend {
   clientTurnId: string;
@@ -25,26 +30,10 @@ interface PendingSend {
 const STUDENT_KEY = "qt.studentId";
 const SETTINGS_KEY = "qt.settings";
 
-function load<T>(key: string, fallback: T): T {
-  try {
-    const v = localStorage.getItem(key);
-    return v ? (JSON.parse(v) as T) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-function save(key: string, value: unknown) {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    // storage unavailable (private mode); fine
-  }
-}
-
 export function App() {
   const [phase, setPhase] = useState<Phase>("welcome");
   const [studentId, setStudentId] = useState<string | null>(() => load<string | null>(STUDENT_KEY, null));
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionNumber, setSessionNumber] = useState<number | null>(null);
   const [board, setBoard] = useState<BoardItem[]>([]);
   const [progress, setProgress] = useState<ProgressRow[]>([]);
   const [caption, setCaption] = useState("");
@@ -52,102 +41,34 @@ export function App() {
   const [chat, setChat] = useState<ChatLine[]>([]);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [canRetry, setCanRetry] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [typed, setTyped] = useState("");
-  const [tab, setTab] = useState<"why" | "chat">("why");
   const [streak, setStreak] = useState(0);
   const [inReview, setInReview] = useState(false);
-  const [sessionNumber, setSessionNumber] = useState<number | null>(null);
   const [badge, setBadge] = useState<string | null>(null);
-  const [settings, setSettings] = useState(() =>
-    load(SETTINGS_KEY, { voice: true, autoListen: true, stt: (browserSttAvailable() ? "browser" : "server") as SttMode }),
-  );
+  const [settings, setSettings] = useState<Settings>(() => load(SETTINGS_KEY, { voice: true, autoListen: true, stt: browserSttAvailable() ? "browser" : "server" }));
 
-  const speaker = useRef<Speaker | null>(null);
-  const listener = useRef<Listener | null>(null);
+  const voice = useRef<VoiceLoop | null>(null);
+  voice.current ??= new VoiceLoop();
+  const turnToken = useRef(0);
   const pending = useRef<PendingSend | null>(null);
-  const lastTts = useRef<number>(0);
+  const lastTtsMs = useRef(0);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   // Read through a ref: the first auto-listen starts before React re-renders with the new session id.
   const sessionRef = useRef<string | null>(null);
 
   useEffect(() => save(SETTINGS_KEY, settings), [settings]);
-  useEffect(() => {
-    speaker.current = new Speaker();
-    return () => speaker.current?.cancel();
-  }, []);
+  useEffect(() => () => voice.current?.interrupt(), []);
 
-  // ---------------------------------------------------------------- listening
+  // ---------------------------------------------------------------- applying a tutor turn
 
-  const submit = useCallback(async (send: PendingSend) => {
-      const sessionId = sessionRef.current;
-      if (!sessionId) return;
-      pending.current = send;
-      setPhase("thinking");
-      setInterim("");
-      setError(null);
-      setChat((c) => [...c, { role: "student", text: send.text }]);
-      try {
-        const t = await api.sendTurn(sessionId, send.clientTurnId, send.text, send.source, { sttMs: send.sttMs ?? 0, prevTtsMs: lastTts.current });
-        pending.current = null;
-        await applyTurn(t, send.text);
-      } catch (err) {
-        setChat((c) => c.slice(0, -1));
-        setError(err instanceof ApiError && err.status === 409 ? "This lesson was updated in another tab. Reload the page." : `${(err as Error).message} Your answer wasn't lost — press Retry.`);
-        setPhase("error");
-      }
-    }, []);
-
-  const startListening = useCallback(() => {
-    speaker.current?.cancel(); // barge-in: talking over the tutor stops it
-    listener.current?.abort();
-    setError(null);
-    setInterim("");
-    const mode: SttMode = settingsRef.current.stt === "browser" && browserSttAvailable() ? "browser" : "server";
-    if (mode === "server" && !serverSttAvailable()) {
-      setError("This browser can't record audio. Please type your answer.");
-      setPhase("idle");
-      return;
-    }
-    setPhase("listening");
-    const cb = {
-      onInterim: setInterim,
-      onTranscribing: () => setPhase("transcribing"),
-      onFinal: (text: string, source: InputSource, sttMs: number) => {
-        listener.current = null;
-        if (!text) {
-          setPhase("idle");
-          setNotice("I didn't hear anything. Tap the mic and try again, or type below.");
-          return;
-        }
-        setNotice(null);
-        void submit({ clientTurnId: crypto.randomUUID(), text, source, sttMs });
-      },
-      onError: (message: string, recoverable: boolean) => {
-        listener.current = null;
-        if (recoverable && mode === "browser" && serverSttAvailable()) {
-          // Browser STT failed (e.g. offline speech service) → switch to server STT.
-          setSettings((s) => ({ ...s, stt: "server" }));
-          setNotice("Switched to server speech recognition.");
-        } else {
-          setError(message);
-        }
-        setPhase("idle");
-      },
-    };
-    listener.current = mode === "browser" ? listenWithBrowser(cb) : listenWithServer(cb, async (wav) => (await api.transcribe(wav)).text);
-  }, [submit]);
-
-  const stopListening = () => listener.current?.stop();
-
-  // ---------------------------------------------------------------- tutor turn
-
-  async function applyTurn(t: TurnView, studentText: string | null) {
+  const applyTurn = useCallback(async (t: TurnView, studentText: string | null) => {
+    const token = ++turnToken.current;
     setBoard(t.board);
     setProgress(t.progress);
     setCaption(t.speech);
-    setChat((c) => [...c, { role: "tutor", text: t.speech }]);
+    setChat((c) => [...c, ...(studentText ? [{ role: "student" as const, text: studentText }] : []), { role: "tutor", text: t.speech }]);
     setLog((l) => [
       ...l.filter((e) => e.seq !== t.seq),
       { seq: t.seq, studentText, action: t.decision.action, reason: t.decision.reason, correct: t.assessment?.correct ?? null, degraded: t.degraded, totalMs: t.timings.totalMs },
@@ -160,41 +81,106 @@ export function App() {
       setTimeout(() => setBadge(null), 6000);
     }
 
-    if (settingsRef.current.voice && speaker.current?.available) {
+    if (settingsRef.current.voice && voice.current!.canSpeak) {
       setPhase("speaking");
       const t0 = performance.now();
-      await speaker.current.speak(t.speech, t.speechRate);
-      lastTts.current = Math.round(performance.now() - t0);
+      const outcome = await voice.current!.speak(t.speech, t.speechRate);
+      lastTtsMs.current = Math.round(performance.now() - t0);
+      // Interrupted (barge-in, typing, Repeat) or superseded: whoever interrupted owns the phase now.
+      if (outcome === "interrupted" || token !== turnToken.current) return;
     }
-    if (t.complete) {
-      setPhase("complete");
-      return;
-    }
-    setPhase((p) => (p === "speaking" || p === "thinking" || p === "loading" ? "idle" : p));
+    if (t.complete) return setPhase("complete");
+    setPhase("idle");
     if (settingsRef.current.voice && settingsRef.current.autoListen) startListening();
-  }
+    // No deps: everything it touches is a ref, a state setter, or startListening, which is itself stable.
+  }, []);
+
+  // ---------------------------------------------------------------- sending a student turn
+
+  const submit = useCallback(
+    async (send: PendingSend) => {
+      const sessionId = sessionRef.current;
+      if (!sessionId) return;
+      turnToken.current++;
+      voice.current!.interrupt();
+      pending.current = send;
+      setPhase("thinking");
+      setInterim("");
+      setError(null);
+      setCanRetry(false);
+      let t: TurnView;
+      try {
+        t = await api.sendTurn(sessionId, send.clientTurnId, send.text, send.source, { sttMs: send.sttMs ?? 0, prevTtsMs: lastTtsMs.current });
+      } catch (err) {
+        if (err instanceof ApiError && err.code === "session_closed") {
+          // This tab's session ended (timed out or restarted elsewhere): carry on in a fresh one.
+          pending.current = null;
+          setNotice("That session had ended, so we've started a new one.");
+          return void begin(false);
+        }
+        setError(err instanceof ApiError && err.status === 409 ? "This lesson was updated in another tab. Reload the page." : `${(err as Error).message} Your answer wasn't lost.`);
+        setCanRetry(!(err instanceof ApiError && err.status === 409));
+        setPhase("error");
+        return;
+      }
+      pending.current = null;
+      await applyTurn(t, send.text);
+    },
+    [applyTurn], // begin() only uses refs and setters, so the first render's copy is fine
+  );
+
+  const startListening = useCallback(() => {
+    turnToken.current++;
+    setError(null);
+    setInterim("");
+    const mode: SttMode = settingsRef.current.stt === "browser" && browserSttAvailable() ? "browser" : "server";
+    if (mode === "server" && !serverSttAvailable()) {
+      setError("This browser can't record audio. Please type your answer.");
+      return setPhase("idle");
+    }
+    setPhase("listening");
+    voice.current!.listen(
+      mode,
+      {
+        onInterim: setInterim,
+        onTranscribing: () => setPhase("transcribing"),
+        onFinal: (text, source, sttMs) => {
+          if (!text) {
+            setPhase("idle");
+            return setNotice("I didn't hear anything. Tap the mic and try again, or type below.");
+          }
+          setNotice(null);
+          void submit({ clientTurnId: crypto.randomUUID(), text, source, sttMs });
+        },
+        onError: (message, recoverable) => {
+          if (recoverable && mode === "browser" && serverSttAvailable()) {
+            // Browser STT failed (e.g. offline speech service) → switch to server STT.
+            setSettings((s) => ({ ...s, stt: "server" }));
+            setNotice("Switched to server speech recognition.");
+          } else {
+            setError(message);
+          }
+          setPhase("idle");
+        },
+      },
+      async (wav) => (await api.transcribe(wav)).text,
+    );
+  }, [submit]);
 
   // ---------------------------------------------------------------- session
 
-  async function begin(forceNewStudent = false) {
+  async function begin(newStudent: boolean) {
     setPhase("loading");
     setError(null);
-    const sid = forceNewStudent ? null : studentId;
     try {
-      const res = await api.startSession(sid);
+      const res = await api.startSession(newStudent ? null : load<string | null>(STUDENT_KEY, null));
       setStudentId(res.studentId);
       save(STUDENT_KEY, res.studentId);
       sessionRef.current = res.sessionId;
-      setSessionId(res.sessionId);
       setSessionNumber(res.sessionNumber);
-      if (res.resumed) {
-        const rows = await api.decisionLog(res.sessionId);
-        setLog(rows.map((r) => ({ ...r })));
-        setChat(rows.flatMap((r) => (r.studentText ? [{ role: "student" as const, text: r.studentText }] : [])));
-      } else {
-        setLog([]);
-        setChat([]);
-      }
+      const rows = res.resumed ? await api.decisionLog(res.sessionId) : [];
+      setLog(rows);
+      setChat(rows.flatMap((r): ChatLine[] => [...(r.studentText ? [{ role: "student" as const, text: r.studentText }] : []), { role: "tutor", text: r.tutorSpeech }]));
       await applyTurn(res.turn, null);
     } catch (err) {
       setError(`Couldn't start the lesson: ${(err as Error).message}`);
@@ -202,122 +188,42 @@ export function App() {
     }
   }
 
-  /** Replay the last thing Tara said, instantly and locally (no server round trip). */
+  /** Replay Tara's last turn, instantly and locally (no server round trip). */
   async function replay(rate: number) {
-    if (!caption || !speaker.current?.available) return;
-    listener.current?.abort();
+    if (!caption || !voice.current!.canSpeak) return;
+    turnToken.current++;
     setPhase("speaking");
-    await speaker.current.speak(caption, rate);
-    setPhase((p) => (p === "speaking" ? "idle" : p));
+    if ((await voice.current!.speak(caption, rate)) === "done") setPhase("idle");
   }
 
-  function retry() {
-    if (pending.current) void submit(pending.current);
+  function onMic() {
+    if (phase === "listening") voice.current!.finishListening();
+    else startListening();
   }
 
-  function sendTyped(e: React.FormEvent) {
-    e.preventDefault();
-    const text = typed.trim();
-    if (!text || phase === "thinking" || phase === "transcribing") return;
-    listener.current?.abort();
-    speaker.current?.cancel();
-    setTyped("");
-    void submit({ clientTurnId: crypto.randomUUID(), text, source: "typed" });
-  }
-
-  // Space bar toggles the mic (outside the text box).
+  // Space toggles the mic, unless focus is on something Space already operates.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.code !== "Space" || (e.target as HTMLElement)?.tagName === "INPUT") return;
+      const el = e.target as HTMLElement | null;
+      if (e.code !== "Space" || e.repeat || el?.isContentEditable || /^(INPUT|TEXTAREA|SELECT|BUTTON|A)$/.test(el?.tagName ?? "")) return;
+      if (phase !== "listening" && phase !== "idle" && phase !== "speaking") return;
       e.preventDefault();
-      if (phase === "listening") stopListening();
-      else if (phase === "idle" || phase === "speaking") startListening();
+      onMic();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [phase, startListening]);
+  });
 
   // ---------------------------------------------------------------- render
 
-  if (phase === "welcome" || (phase === "loading" && !sessionId)) {
-    return (
-      <div className="welcome">
-        <div className="welcome-card">
-          <div className="welcome-mark">📐</div>
-          <h1>Quadratic Tutor</h1>
-          <p>
-            Learn NCERT Class 10 quadratic equations with Tara, a voice tutor who teaches on a whiteboard, checks that you've understood, and explains things a different way when
-            something doesn't click.
-          </p>
-          <ul className="welcome-list">
-            <li>Speak your answers (or type them).</li>
-            <li>Six topics, from standard form to word problems.</li>
-            <li>Your progress is saved on this device.</li>
-          </ul>
-          <div className="welcome-actions">
-            <button className="btn primary" disabled={phase === "loading"} onClick={() => begin(false)}>
-              {phase === "loading" ? "Starting…" : studentId ? "Continue lesson" : "Start lesson"}
-            </button>
-            {studentId && (
-              <button className="btn ghost" disabled={phase === "loading"} onClick={() => begin(true)}>
-                Start over as a new student
-              </button>
-            )}
-          </div>
-          {!browserSttAvailable() && <p className="fine">Your browser has no built-in speech recognition, so your voice will be transcribed on our server.</p>}
-          {error && <p className="error">{error}</p>}
-        </div>
-      </div>
-    );
+  if (phase === "welcome" || (phase === "loading" && !sessionRef.current)) {
+    return <WelcomeScreen loading={phase === "loading"} returning={!!studentId} error={error} onStart={begin} />;
   }
 
   const busy = phase === "thinking" || phase === "transcribing" || phase === "loading";
-  const status: Record<Phase, string> = {
-    welcome: "",
-    loading: "Getting ready…",
-    speaking: "Tara is speaking — tap the mic to interrupt",
-    idle: "Tap the mic (or press space) to answer",
-    listening: settings.stt === "browser" ? "Listening… tap to finish" : "Listening… (stops when you pause)",
-    transcribing: "Transcribing…",
-    thinking: "Tara is thinking…",
-    error: "Something went wrong",
-    complete: "Course complete!",
-  };
-
   return (
     <div className="app">
-      <header className="top">
-        <div className="brand">
-          <span className="brand-mark">📐</span> Quadratic Tutor
-          {sessionNumber !== null && <span className="session-chip">Session {sessionNumber}</span>}
-          {streak >= 2 && (
-            <span className="streak-chip" title="Correct answers in a row">
-              🔥 {streak} in a row
-            </span>
-          )}
-        </div>
-        <div className="settings">
-          <label>
-            <input type="checkbox" checked={settings.voice} onChange={(e) => setSettings((s) => ({ ...s, voice: e.target.checked }))} /> Voice
-          </label>
-          <label>
-            <input type="checkbox" checked={settings.autoListen} onChange={(e) => setSettings((s) => ({ ...s, autoListen: e.target.checked }))} /> Hands-free
-          </label>
-          <a href="/insights" title="How the tutor is doing, from the turn log">
-            Insights
-          </a>
-          <label>
-            STT
-            <select value={settings.stt} onChange={(e) => setSettings((s) => ({ ...s, stt: e.target.value as SttMode }))}>
-              <option value="browser" disabled={!browserSttAvailable()}>
-                Browser
-              </option>
-              <option value="server">Server</option>
-            </select>
-          </label>
-        </div>
-      </header>
-
+      <TopBar sessionNumber={sessionNumber} streak={streak} settings={settings} onSettings={setSettings} />
       <main className="main">
         <ProgressRail rows={progress} />
 
@@ -349,58 +255,18 @@ export function App() {
           {error && (
             <div className="error-bar">
               <span>{error}</span>
-              {pending.current && (
-                <button className="btn small" onClick={retry}>
+              {canRetry && pending.current && (
+                <button className="btn small" onClick={() => pending.current && submit(pending.current)}>
                   Retry
                 </button>
               )}
             </div>
           )}
 
-          <div className="controls">
-            <button
-              className={`mic ${phase}`}
-              aria-label={phase === "listening" ? "Stop listening" : "Start speaking"}
-              disabled={busy || phase === "complete"}
-              onClick={() => (phase === "listening" ? stopListening() : startListening())}
-            >
-              {phase === "listening" ? "■" : "🎤"}
-            </button>
-            <div className="status">
-              <div className="status-text">{status[phase]}</div>
-              <div className="interim">{interim}</div>
-            </div>
-          </div>
-
-          <form className="typed" onSubmit={sendTyped}>
-            <input value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="…or type your answer here" disabled={busy || phase === "complete"} />
-            <button className="btn" disabled={!typed.trim() || busy}>
-              Send
-            </button>
-          </form>
+          <AnswerControls phase={phase} interim={interim} onMic={onMic} onSend={(text) => submit({ clientTurnId: crypto.randomUUID(), text, source: "typed" })} />
         </section>
 
-        <div className="side">
-          <div className="tabs">
-            <button className={tab === "why" ? "on" : ""} onClick={() => setTab("why")}>
-              Decisions
-            </button>
-            <button className={tab === "chat" ? "on" : ""} onClick={() => setTab("chat")}>
-              Transcript
-            </button>
-          </div>
-          {tab === "why" ? (
-            <DecisionLog entries={log} />
-          ) : (
-            <div className="chat">
-              {chat.map((c, i) => (
-                <div key={i} className={`bubble ${c.role}`}>
-                  {c.text}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        <SidePanel log={log} chat={chat} />
       </main>
     </div>
   );

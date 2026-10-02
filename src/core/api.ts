@@ -58,6 +58,7 @@ export interface DecisionLogRow {
   seq: number;
   createdAt: number;
   studentText: string | null;
+  tutorSpeech: string;
   subconceptId: string | null;
   action: string;
   reason: string;

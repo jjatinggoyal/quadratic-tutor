@@ -7,6 +7,8 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    /** Server-provided reason, e.g. "session_closed" or "conflict". */
+    public code?: string,
   ) {
     super(message);
   }
@@ -23,7 +25,10 @@ async function post<T>(path: string, body: unknown, timeoutMs = 30_000): Promise
       signal: ctrl.signal,
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new ApiError(res.status, (data as { error?: string }).error ?? `HTTP ${res.status}`);
+    if (!res.ok) {
+      const { error, code } = data as { error?: string; code?: string };
+      throw new ApiError(res.status, error ?? `HTTP ${res.status}`, code);
+    }
     return data as T;
   } catch (err) {
     if (err instanceof ApiError) throw err;
@@ -56,8 +61,13 @@ export const api = {
 
   transcribe: (audioBase64: string) => post<{ text: string; ms: number }>("/api/stt", { audio: audioBase64 }, 20_000),
 
+  /** Best effort: a slow or failed log only means an empty side panel, never a stuck start. */
   decisionLog: async (sessionId: string): Promise<DecisionLogRow[]> => {
-    const res = await fetch(`/api/session/${sessionId}/log`);
-    return res.ok ? res.json() : [];
+    try {
+      const res = await fetch(`/api/session/${sessionId}/log`, { signal: AbortSignal.timeout(8000) });
+      return res.ok ? await res.json() : [];
+    } catch {
+      return [];
+    }
   },
 };

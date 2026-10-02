@@ -9,7 +9,8 @@ import type { BoardItem } from "../../core/types";
 const KATEX_OPTS = {
   throwOnError: true,
   strict: false,
-  trust: (ctx: { command: string }) => ctx.command === "\\htmlClass",
+  // Only our own highlight class: LLM-written LaTeX must not be able to borrow other app classes.
+  trust: (ctx: { command: string; class?: string }) => ctx.command === "\\htmlClass" && ctx.class === "hl",
 } as const;
 
 function renderMath(content: string, term?: string): { html: string; lineHighlight: boolean } {
