@@ -55,6 +55,10 @@ export function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [typed, setTyped] = useState("");
   const [tab, setTab] = useState<"why" | "chat">("why");
+  const [streak, setStreak] = useState(0);
+  const [inReview, setInReview] = useState(false);
+  const [sessionNumber, setSessionNumber] = useState<number | null>(null);
+  const [badge, setBadge] = useState<string | null>(null);
   const [settings, setSettings] = useState(() =>
     load(SETTINGS_KEY, { voice: true, autoListen: true, stt: (browserSttAvailable() ? "browser" : "server") as SttMode }),
   );
@@ -149,11 +153,17 @@ export function App() {
       { seq: t.seq, studentText, action: t.decision.action, reason: t.decision.reason, correct: t.assessment?.correct ?? null, degraded: t.degraded, totalMs: t.timings.totalMs },
     ]);
     setNotice(t.degraded ? "The AI service is struggling, so I'm using backup lessons for a moment." : null);
+    setStreak(t.streak);
+    setInReview(t.review);
+    if (t.celebrate) {
+      setBadge(t.celebrate.label);
+      setTimeout(() => setBadge(null), 6000);
+    }
 
     if (settingsRef.current.voice && speaker.current?.available) {
       setPhase("speaking");
       const t0 = performance.now();
-      await speaker.current.speak(t.speech);
+      await speaker.current.speak(t.speech, t.speechRate);
       lastTts.current = Math.round(performance.now() - t0);
     }
     if (t.complete) {
@@ -176,6 +186,7 @@ export function App() {
       save(STUDENT_KEY, res.studentId);
       sessionRef.current = res.sessionId;
       setSessionId(res.sessionId);
+      setSessionNumber(res.sessionNumber);
       if (res.resumed) {
         const rows = await api.decisionLog(res.sessionId);
         setLog(rows.map((r) => ({ ...r })));
@@ -189,6 +200,15 @@ export function App() {
       setError(`Couldn't start the lesson: ${(err as Error).message}`);
       setPhase("welcome");
     }
+  }
+
+  /** Replay the last thing Tara said, instantly and locally (no server round trip). */
+  async function replay(rate: number) {
+    if (!caption || !speaker.current?.available) return;
+    listener.current?.abort();
+    setPhase("speaking");
+    await speaker.current.speak(caption, rate);
+    setPhase((p) => (p === "speaking" ? "idle" : p));
   }
 
   function retry() {
@@ -269,6 +289,12 @@ export function App() {
       <header className="top">
         <div className="brand">
           <span className="brand-mark">📐</span> Quadratic Tutor
+          {sessionNumber !== null && <span className="session-chip">Session {sessionNumber}</span>}
+          {streak >= 2 && (
+            <span className="streak-chip" title="Correct answers in a row">
+              🔥 {streak} in a row
+            </span>
+          )}
         </div>
         <div className="settings">
           <label>
@@ -277,6 +303,9 @@ export function App() {
           <label>
             <input type="checkbox" checked={settings.autoListen} onChange={(e) => setSettings((s) => ({ ...s, autoListen: e.target.checked }))} /> Hands-free
           </label>
+          <a href="/insights" title="How the tutor is doing, from the turn log">
+            Insights
+          </a>
           <label>
             STT
             <select value={settings.stt} onChange={(e) => setSettings((s) => ({ ...s, stt: e.target.value as SttMode }))}>
@@ -293,11 +322,27 @@ export function App() {
         <ProgressRail rows={progress} />
 
         <section className="stage">
+          {inReview && <div className="review-banner">Warm-up: a quick question from a topic you mastered before, to check it stuck.</div>}
+          {badge && (
+            <div className="fixed-badge" role="status">
+              ✨ You fixed it: <strong>{badge}</strong>
+            </div>
+          )}
           <Whiteboard items={board} />
 
           <div className="caption" aria-live="polite">
             <span className="caption-who">Tara</span>
-            <span>{caption}</span>
+            <span className="caption-text">{caption}</span>
+            {caption && settings.voice && (
+              <span className="caption-actions">
+                <button className="btn small" onClick={() => replay(1)} disabled={busy} title="Hear that again">
+                  ↻ Repeat
+                </button>
+                <button className="btn small" onClick={() => replay(0.75)} disabled={busy} title="Hear that again, slower">
+                  🐢 Slower
+                </button>
+              </span>
+            )}
           </div>
 
           {notice && <div className="notice">{notice}</div>}

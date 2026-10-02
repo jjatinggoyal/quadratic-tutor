@@ -187,7 +187,7 @@ export class Speaker {
    * Speak sentence by sentence (Chrome cuts off long utterances). Resolves
    * when finished or cancelled; `onSentence` lets the UI follow along.
    */
-  speak(text: string, onSentence?: (i: number) => void): Promise<void> {
+  speak(text: string, rate = 1, onSentence?: (i: number) => void): Promise<void> {
     this.cancel();
     if (!this.available || !text) return Promise.resolve();
     const token = ++this.token;
@@ -198,7 +198,7 @@ export class Speaker {
         const u = new SpeechSynthesisUtterance(sentences[i]);
         if (this.voice) u.voice = this.voice;
         u.lang = this.voice?.lang ?? "en-IN";
-        u.rate = 1.0;
+        u.rate = rate;
         u.onstart = () => onSentence?.(i);
         u.onend = () => next(i + 1);
         u.onerror = () => next(i + 1);

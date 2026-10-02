@@ -27,7 +27,17 @@ export function ProgressRail({ rows }: { rows: ProgressRow[] }) {
                 {LABEL[r.status]}
                 {r.checksAttempted > 0 && ` · ${r.checksCorrect}/${r.checksAttempted} correct`}
                 {r.reteachCount > 0 && ` · re-taught ${r.reteachCount}×`}
+                {r.reviewsPassed > 0 && " · remembered ✓"}
               </span>
+              {r.mistakes.length > 0 && (
+                <span className="rail-mistakes">
+                  {r.mistakes.slice(0, 2).map((m) => (
+                    <span key={m.id} className={`mistake ${m.fixed ? "fixed" : ""}`} title={m.fixed ? "You made this mistake and then fixed it" : "A mistake to watch for"}>
+                      {m.fixed ? "✓" : "⚠"} {m.label}
+                    </span>
+                  ))}
+                </span>
+              )}
             </span>
           </li>
         ))}
